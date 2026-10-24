@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">Aird Chat</string>
+    <string name="server_title">Aird server</string>
+    <string name="server_hint">https://dx6si.aiccloud.online</string>
+    <string name="server_help">The address you already open in the browser. Authentik signs you in first, then Aird.</string>
+    <string name="server_continue">Continue</string>
+    <string name="server_invalid">Enter a full http or https address.</string>
+    <string name="server_change_title">Change server?</string>
+    <string name="server_change_body">This leaves the current Aird session on this phone.</string>
+    <string name="server_change_confirm">Change</string>
+    <string name="server_change_stay">Stay</string>
+</resources>
