@@ -18,9 +18,21 @@ data class Conversation(
     val muted: Boolean = false,
     val members: List<Member> = emptyList(),
     val online: Boolean = false,
+    val request: String = "",
 ) {
     fun name(): String = peer.ifEmpty { title.ifEmpty { "Chat" } }
     fun whenLabel(): String = formatListTime(updatedAt)
+}
+
+fun filterConversations(items: List<Conversation>, query: String): List<Conversation> {
+    val q = query.trim()
+    if (q.isEmpty()) return items
+    return items.filter { conversation ->
+        conversation.name().contains(q, true) ||
+            conversation.peer.contains(q, true) ||
+            conversation.title.contains(q, true) ||
+            conversation.preview.contains(q, true)
+    }
 }
 
 data class ChatAttachment(
@@ -55,14 +67,6 @@ data class ReadReceipt(
 
 data class ChatPin(val messageId: String, val preview: String)
 
-data class SearchHit(
-    val id: String,
-    val conversationId: String,
-    val sender: String,
-    val snippet: String,
-    val createdAt: String,
-)
-
 data class ChatMessage(
     val id: String,
     val conversationId: String,
@@ -71,6 +75,7 @@ data class ChatMessage(
     val createdAt: String,
     val mine: Boolean,
     val pending: Boolean = false,
+    val failed: Boolean = false,
     val e2e: Boolean = false,
     val decryptOk: Boolean = true,
     val replyToId: String = "",
@@ -97,6 +102,22 @@ data class ChatMessage(
         if (att.visual()) return att.name.ifBlank { "Photo" }
         return att.name.ifBlank { "File" }
     }
+}
+
+fun editAllowed(
+    message: ChatMessage,
+    receipts: List<ReadReceipt>,
+    me: String,
+    now: Instant = Instant.now(),
+): Boolean {
+    if (!message.mine || message.pending || message.failed || message.attachments.isNotEmpty()) return false
+    if (!message.decryptOk || message.body.isBlank()) return false
+    val seen = receipts.mapNotNull { receipt ->
+        if (receipt.username.equals(me, true)) return@mapNotNull null
+        if (!receiptCovers(receipt, message)) return@mapNotNull null
+        parseInstant(receipt.lastReadAt)
+    }.minOrNull() ?: return true
+    return java.time.Duration.between(seen, now).toMillis() < 30_000
 }
 
 fun seenLabel(

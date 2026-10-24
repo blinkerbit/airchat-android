@@ -172,6 +172,10 @@ class AirdConnectionService : Service() {
         private const val NOTIFICATION_ID = 42
         private var hooked = false
 
+        fun stop(context: Context) {
+            context.stopService(Intent(context, AirdConnectionService::class.java))
+        }
+
         fun start(context: Context) {
             val intent = Intent(context, AirdConnectionService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)

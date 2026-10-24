@@ -12,14 +12,32 @@ object ChatE2E {
     private var identity: ChatCrypto.Identity? = null
     private var username: String = ""
     private val keys = mutableMapOf<String, ByteArray>()
+    @Volatile private var generation = 0
+
+    fun clear() {
+        generation += 1
+        identity = null
+        username = ""
+        keys.clear()
+    }
 
     suspend fun prepare(context: Context, user: String) = lock.withLock {
+        val gen = generation
         username = user
         if (identity != null) return@withLock
-        val response = AirdHttp.get(context, "/api/chat/e2e/identity")
-        val backup = response.json().optJSONObject("backup")
-        val loaded = backup?.let { readIdentity(it) }
-        identity = loaded ?: ChatCrypto.generateIdentity().also { fresh ->
+        val response = try {
+            AirdHttp.get(context, "/api/chat/e2e/identity")
+        } catch (_: Exception) {
+            return@withLock
+        }
+        if (!response.ok || gen != generation) return@withLock
+        val root = response.json()
+        if (root.has("backup") && !root.isNull("backup")) {
+            val loaded = root.optJSONObject("backup")?.let { readIdentity(it) } ?: return@withLock
+            if (gen != generation) return@withLock
+            identity = loaded
+        } else {
+            val fresh = ChatCrypto.generateIdentity()
             val bundle = JSONObject()
                 .put("v", 1)
                 .put("kind", "aird-chat-e2e-identity")
@@ -27,9 +45,12 @@ object ChatE2E {
                 .put("publicJwk", JSONObject(fresh.publicJson()))
                 .put("privateJwk", JSONObject(fresh.privateJson()))
                 .put("kid", fresh.kid())
-            AirdHttp.send(context, "/api/chat/e2e/identity", "PUT", JSONObject().put("backup", bundle))
+            val saved = AirdHttp.send(context, "/api/chat/e2e/identity", "PUT", JSONObject().put("backup", bundle))
+            if (!saved.ok || gen != generation) return@withLock
+            identity = fresh
         }
         val current = identity ?: return@withLock
+        if (gen != generation) return@withLock
         AirdHttp.send(context, "/api/chat/e2e/keys", "PUT", JSONObject().put("public_jwk", JSONObject(current.publicJson())))
     }
 

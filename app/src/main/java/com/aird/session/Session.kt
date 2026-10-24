@@ -2,7 +2,10 @@ package com.aird.session
 
 import android.content.Context
 import android.webkit.CookieManager
+import com.aird.AirdConnectionService
 import com.aird.ServerStore
+import com.aird.chat.data.ChatE2E
+import com.aird.chat.data.ChatRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONObject
@@ -43,6 +46,10 @@ object Session {
     fun signOut(context: Context) {
         CookieManager.getInstance().removeAllCookies(null)
         CookieManager.getInstance().flush()
+        ChatRepository.clear()
+        ChatE2E.clear()
+        AirdSocket.stop()
+        AirdConnectionService.stop(context)
         _signedIn.value = false
         _username.value = ""
     }

@@ -31,9 +31,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -78,6 +78,9 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
+import com.aird.chat.model.ReadReceipt
+import com.aird.chat.model.editAllowed
+import java.time.Instant
 import com.aird.session.AirdHttp
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.enterRiseModifier
@@ -126,12 +129,15 @@ private fun ChatMessage.sticker(): Boolean {
     return text in Stickers || text.none { it.isLetterOrDigit() }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageRow(
     message: ChatMessage,
     quoteMessage: ChatMessage?,
     quoteText: String,
     seen: String,
+    receipts: List<ReadReceipt>,
+    me: String,
     highlighted: Boolean = false,
     onQuoteClick: (String) -> Unit = {},
     onReply: () -> Unit,
@@ -140,6 +146,8 @@ fun MessageRow(
     onDelete: () -> Unit,
     onReact: (String) -> Unit,
     onPin: () -> Unit,
+    onSave: (ChatAttachment) -> Unit,
+    onRetry: () -> Unit,
     pinned: Boolean,
     enter: Boolean = false,
 ) {
@@ -151,6 +159,15 @@ fun MessageRow(
     var gesture by remember(message.id) { mutableIntStateOf(0) }
     val settle = remember(message.id) { Animatable(0f) }
     var menu by remember(message.id) { mutableStateOf(false) }
+    var nowMs by remember(message.id) { mutableStateOf(System.currentTimeMillis()) }
+    androidx.compose.runtime.LaunchedEffect(menu) {
+        if (!menu) return@LaunchedEffect
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    val canEdit = editAllowed(message, receipts, me, Instant.ofEpochMilli(nowMs))
     var editing by remember(message.id) { mutableStateOf(false) }
     var editText by remember(message.id) { mutableStateOf(message.body) }
     var confirmDelete by remember(message.id) { mutableStateOf(false) }
@@ -222,41 +239,47 @@ fun MessageRow(
                         highlighted = highlighted,
                         onQuoteClick = onQuoteClick,
                         onLongPress = { menu = true },
+                        onRetry = onRetry,
                         onOpen = { viewer = it },
                         onFile = { attachment ->
                             openAttachment(context, attachment)
                         },
                     )
                 }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    Row(Modifier.padding(horizontal = 8.dp)) {
-                        Reactions.forEach { emoji ->
-                            Text(
-                                emoji,
-                                fontSize = 22.sp,
-                                modifier = Modifier.clickable {
-                                    menu = false
-                                    onReact(emoji)
-                                }.padding(6.dp),
-                            )
+                if (menu) {
+                    ModalBottomSheet(onDismissRequest = { menu = false }) {
+                        Row(Modifier.padding(horizontal = 16.dp)) {
+                            Reactions.forEach { emoji ->
+                                Text(
+                                    emoji,
+                                    fontSize = 22.sp,
+                                    modifier = Modifier.clickable {
+                                        menu = false
+                                        onReact(emoji)
+                                    }.padding(6.dp),
+                                )
+                            }
                         }
+                        SheetAction("Reply") { menu = false; onReply() }
+                        SheetAction("Copy") {
+                            menu = false
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            clipboard.setPrimaryClip(ClipData.newPlainText("message", message.body))
+                        }
+                        SheetAction("Forward") { menu = false; onForward() }
+                        if (canEdit) SheetAction("Edit") { menu = false; editing = true }
+                        if (message.mine) SheetAction("Delete") { menu = false; confirmDelete = true }
+                        if (message.attachments.isNotEmpty()) {
+                            if (message.attachments.size == 1) {
+                                SheetAction("Save a copy") { menu = false; onSave(message.attachments.first()) }
+                            } else {
+                                message.attachments.forEach { attachment ->
+                                    SheetAction("Save ${attachment.name}") { menu = false; onSave(attachment) }
+                                }
+                            }
+                        }
+                        SheetAction(if (pinned) "Unpin" else "Pin") { menu = false; onPin() }
                     }
-                    DropdownMenuItem(text = { Text("Copy") }, onClick = {
-                        menu = false
-                        val clipboard = context.getSystemService(ClipboardManager::class.java)
-                        clipboard.setPrimaryClip(ClipData.newPlainText("message", message.body))
-                    })
-                    DropdownMenuItem(text = { Text("Reply") }, onClick = { menu = false; onReply() })
-                    DropdownMenuItem(text = { Text("Forward") }, onClick = { menu = false; onForward() })
-                    DropdownMenuItem(text = { Text("Edit") }, onClick = {
-                        menu = false
-                        if (message.mine) editing = true else onEdit(message.body.ifBlank { "x" })
-                    })
-                    DropdownMenuItem(text = { Text("Delete") }, onClick = {
-                        menu = false
-                        if (message.mine) confirmDelete = true else onDelete()
-                    })
-                    DropdownMenuItem(text = { Text(if (pinned) "Unpin" else "Pin") }, onClick = { menu = false; onPin() })
                 }
             }
             if (message.reactions.isNotEmpty()) {
@@ -277,9 +300,17 @@ fun MessageRow(
                 if (message.edited) {
                     Text(" edited", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
                 }
-                if (message.pending) {
-                    Text(" · sending", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
-                }
+            }
+            if (message.pending) {
+                Text("Sending", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+            }
+            if (message.failed) {
+                Text(
+                    "Not sent",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.clickable(onClick = onRetry),
+                )
             }
             if (seen.isNotEmpty()) {
                 Text(seen, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
@@ -327,6 +358,7 @@ private fun Bubble(
     highlighted: Boolean,
     onQuoteClick: (String) -> Unit,
     onLongPress: () -> Unit,
+    onRetry: () -> Unit,
     onOpen: (ChatAttachment) -> Unit,
     onFile: (ChatAttachment) -> Unit,
 ) {
@@ -341,9 +373,14 @@ private fun Bubble(
 
     Column(
         Modifier.widthIn(max = 300.dp)
-            .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = if (mine) 16.dp else 4.dp, bottomEnd = if (mine) 4.dp else 16.dp))
+            .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = if (mine) 18.dp else 4.dp, bottomEnd = if (mine) 4.dp else 18.dp))
             .background(animatedBg)
-            .pointerInput(message.id) { detectTapGestures(onLongPress = { onLongPress() }) }
+            .pointerInput(message.id, message.failed) {
+                detectTapGestures(
+                    onLongPress = { onLongPress() },
+                    onTap = { if (message.failed) onRetry() },
+                )
+            }
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
         if (message.forwarded) Text("Forwarded", color = fg.copy(alpha = 0.7f), fontSize = 12.sp)
@@ -390,6 +427,15 @@ private fun Bubble(
             if (message.body.isNotBlank()) Text(highlight(message.body, fg), color = fg, fontSize = 16.sp)
         }
     }
+}
+
+@Composable
+private fun SheetAction(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
+        fontSize = 16.sp,
+    )
 }
 
 @Composable

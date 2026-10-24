@@ -18,7 +18,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val presence = ChatRepository.presence
     val receipts = ChatRepository.receipts
     val pins = ChatRepository.pins
-    val searchResults = ChatRepository.searchResults
     val uploading = ChatRepository.uploading
     val loadingMore = ChatRepository.loadingMore
     val hasMore = ChatRepository.hasMore
@@ -39,12 +38,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun send(text: String, replyToId: String?) {
-        viewModelScope.launch { ChatRepository.send(getApplication(), text, replyToId) }
+    fun send(text: String, replyToId: String?, onResult: (Boolean) -> Unit = {}) {
+        viewModelScope.launch { onResult(ChatRepository.send(getApplication(), text, replyToId)) }
+    }
+
+    fun retry(message: ChatMessage) {
+        viewModelScope.launch { ChatRepository.retry(getApplication(), message) }
+    }
+
+    fun respond(action: String) {
+        val id = ChatRepository.activeId.value
+        if (id.isEmpty()) return
+        viewModelScope.launch { ChatRepository.respond(getApplication(), id, action) }
     }
 
     fun attach(uris: List<Uri>, caption: String, replyToId: String?) {
         viewModelScope.launch { ChatRepository.attach(getApplication(), uris, caption, replyToId) }
+    }
+
+    fun attachPaths(paths: List<String>, caption: String, replyToId: String?) {
+        viewModelScope.launch { ChatRepository.attachPaths(getApplication(), paths, caption, replyToId) }
+    }
+
+    fun saveCopy(message: ChatMessage, index: Int, destDir: String) {
+        viewModelScope.launch { ChatRepository.saveCopy(getApplication(), message, index, destDir) }
     }
 
     fun attachBytes(name: String, mime: String, bytes: ByteArray, caption: String, replyToId: String?) {
@@ -75,10 +92,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val id = ChatRepository.activeId.value
         if (id.isEmpty()) return
         viewModelScope.launch { ChatRepository.mute(getApplication(), id, muted) }
-    }
-
-    fun search(query: String) {
-        viewModelScope.launch { ChatRepository.search(getApplication(), query) }
     }
 
     fun lookup(query: String) {

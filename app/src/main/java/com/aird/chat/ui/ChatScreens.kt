@@ -15,7 +15,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -33,6 +32,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -43,13 +43,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -59,6 +57,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
@@ -76,7 +75,6 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import androidx.compose.ui.Alignment
@@ -96,9 +94,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aird.call.CallController
 import com.aird.call.CallPhase
 import com.aird.chat.data.ChatRepository
+import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
+import com.aird.chat.model.ChatPin
 import com.aird.chat.model.Conversation
-import com.aird.chat.model.formatListTime
+import com.aird.chat.model.filterConversations
 import com.aird.chat.model.seenLabel
 import com.aird.session.Session
 import com.aird.theme.AirdPalettes
@@ -138,7 +138,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.systemBars,
+        contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.ime),
         topBar = {
             TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -222,21 +222,14 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                 Text(error, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
             val reduced = LocalAirdReducedMotion.current
-            val slidePx = with(LocalDensity.current) { 8.dp.roundToPx() }
             AnimatedContent(
                 targetState = active.isEmpty(),
                 modifier = Modifier.fillMaxSize(),
                 transitionSpec = {
                     if (reduced) {
                         ContentTransform(EnterTransition.None, ExitTransition.None, sizeTransform = null)
-                    } else if (targetState) {
-                        ContentTransform(fadeIn(tween(200)), fadeOut(tween(180)), sizeTransform = null)
                     } else {
-                        ContentTransform(
-                            fadeIn(tween(240)) + slideInVertically(tween(240)) { slidePx },
-                            fadeOut(tween(180)),
-                            sizeTransform = null,
-                        )
+                        ContentTransform(fadeIn(tween(200)), fadeOut(tween(180)), sizeTransform = null)
                     }
                 },
                 label = "conversation",
@@ -357,14 +350,10 @@ private fun CallButtons(conversationId: String, peer: String) {
 @Composable
 private fun ConversationList(items: List<Conversation>, model: ChatViewModel) {
     var query by remember { mutableStateOf("") }
-    val results by model.searchResults.collectAsState()
-    val presence by model.presence.collectAsState()
-    LaunchedEffect(query) {
-        delay(250)
-        model.search(query)
-    }
+    val q = query.trim()
+    val shown = filterConversations(items, q)
     Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(
+        TextField(
             value = query,
             onValueChange = { query = it },
             modifier = Modifier
@@ -382,134 +371,63 @@ private fun ConversationList(items: List<Conversation>, model: ChatViewModel) {
             shape = RoundedCornerShape(24.dp),
             singleLine = true,
         )
-        if (query.trim().length >= 2) {
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(results, key = { it.id }) { hit ->
-                    Surface(
-                        onClick = { model.open(hit.conversationId) },
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                            Text("${hit.sender} · ${formatListTime(hit.createdAt)}", fontWeight = FontWeight.SemiBold, maxLines = 1)
-                            Spacer(Modifier.height(2.dp))
-                            Text(hit.snippet, maxLines = 2, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
-                        }
-                    }
-                }
-            }
-            return
-        }
-        if (items.isEmpty()) {
+        if (shown.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No conversations yet", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                Text(
+                    if (q.isEmpty()) "No conversations yet" else "No matches",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                )
             }
             return
         }
         LazyColumn(
             Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
         ) {
-            items(items, key = { it.id }) { conversation ->
-                val online = if (conversation.kind == "dm") presence[conversation.peer] ?: conversation.online else false
-                val isUnread = conversation.unread > 0
-                val rowBg = if (isUnread) {
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                }
-
-                Surface(
-                    onClick = { model.open(conversation.id) },
-                    shape = RoundedCornerShape(16.dp),
-                    color = rowBg,
-                    modifier = Modifier.fillMaxWidth()
+            items(shown, key = { it.id }) { conversation ->
+                val unread = conversation.unread > 0
+                Row(
+                    Modifier.fillMaxWidth().clickable { model.open(conversation.id) }.padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box {
-                            Avatar(conversation.name(), 50)
-                            if (online) {
-                                Box(
-                                    Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .size(14.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.surface)
-                                        .padding(2.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF4CAF50))
-                                )
-                            }
+                    Avatar(conversation.name(), 40)
+                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                conversation.name(),
+                                fontSize = 16.sp,
+                                fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                conversation.whenLabel(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            )
                         }
-                        Column(Modifier.padding(start = 14.dp).weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                conversation.preview.ifEmpty { "Encrypted message" },
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (unread) {
                                 Text(
-                                    conversation.name(),
-                                    fontWeight = if (isUnread) FontWeight.Bold else FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    conversation.whenLabel(),
+                                    conversation.unread.coerceAtMost(99).toString(),
                                     fontSize = 12.sp,
-                                    fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isUnread) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier
+                                        .padding(start = 8.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary)
+                                        .padding(horizontal = 6.dp, vertical = 1.dp),
                                 )
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (conversation.kind == "group") {
-                                    Icon(
-                                        Icons.Default.Group,
-                                        contentDescription = "Group",
-                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                                        modifier = Modifier.size(15.dp).padding(end = 3.dp)
-                                    )
-                                }
-                                Text(
-                                    conversation.preview.ifEmpty { "Encrypted message" },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    fontWeight = if (isUnread) FontWeight.Medium else FontWeight.Normal,
-                                    color = if (isUnread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                                    modifier = Modifier.weight(1f),
-                                )
-                                if (conversation.muted) {
-                                    Icon(
-                                        Icons.Default.VolumeOff,
-                                        contentDescription = "Muted",
-                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                                        modifier = Modifier.size(15.dp).padding(start = 4.dp)
-                                    )
-                                }
-                                if (conversation.unread > 0) {
-                                    Box(
-                                        Modifier
-                                            .padding(start = 8.dp)
-                                            .height(22.dp)
-                                            .padding(horizontal = 7.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            conversation.unread.coerceAtMost(99).toString(),
-                                            color = MaterialTheme.colorScheme.onPrimary,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
                             }
                         }
                     }
@@ -519,6 +437,7 @@ private fun ConversationList(items: List<Conversation>, model: ChatViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Thread(model: ChatViewModel, conversation: Conversation?) {
     val messages by model.messages.collectAsState()
@@ -532,6 +451,10 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
     var reply by remember { mutableStateOf<ChatMessage?>(null) }
     var highlightId by remember { mutableStateOf("") }
     var forward by remember { mutableStateOf<ChatMessage?>(null) }
+    var attachChoice by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf(false) }
+    var saveTarget by remember { mutableStateOf<Pair<ChatMessage, ChatAttachment>?>(null) }
+    var pinCursor by remember(conversation?.id) { mutableStateOf(0) }
     val density = LocalDensity.current
     val ime = WindowInsets.ime.getBottom(density)
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -598,19 +521,35 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
         }
     }
 
-    LaunchedEffect(messages.size, ime) {
-        if (messages.isNotEmpty() && (!initialScrollDone || listState.firstVisibleItemIndex >= messages.size - 5)) {
+    LaunchedEffect(messages.lastOrNull()?.id, ime) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: messages.lastIndex
+        val nearEnd = !initialScrollDone || lastVisible >= messages.lastIndex - 2
+        if (nearEnd) {
             initialScrollDone = true
             listState.scrollToItem(messages.lastIndex)
         }
     }
-    Column(Modifier.fillMaxSize().imePadding().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))) {
         if (pins.isNotEmpty()) {
+            val index = pinCursor.mod(pins.size)
+            val pin = pins[index]
+            val label = pinLabel(pin, messages)
+            val text = if (pins.size > 1) "$label · ${pins.size}" else label
             Text(
-                "Pinned · ${pins.size}",
-                modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 16.dp, vertical = 8.dp),
+                text,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .clickable {
+                        focusMessage(pin.messageId)
+                        pinCursor = index + 1
+                    }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 color = MaterialTheme.colorScheme.primary,
                 fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -642,6 +581,8 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                         quoteMessage = quoteMsg,
                         quoteText = quoteText,
                         seen = seenLabel(message, messages, receipts, me, conversation?.kind ?: "dm"),
+                        receipts = receipts,
+                        me = me,
                         highlighted = message.id == highlightId,
                         onQuoteClick = { focusMessage(it) },
                         onReply = { reply = message },
@@ -653,6 +594,8 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                             model.react(message, it)
                         },
                         onPin = { model.pin(message) },
+                        onSave = { attachment -> saveTarget = message to attachment },
+                        onRetry = { model.retry(message) },
                         pinned = pins.any { it.messageId == message.id },
                         enter = message.id in entering,
                     )
@@ -673,35 +616,48 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                 }
             }
         }
-        Composer(
-            draft = draft,
-            onDraft = {
-                draft = it
-                model.typing()
-            },
-            panel = panel,
-            onPanel = { panel = if (panel == it) "" else it },
-            reply = reply?.let { "Reply to ${it.sender}: ${it.previewLabel()}" }.orEmpty(),
-            onClearReply = { reply = null },
-            uploading = uploading,
-            onAttach = { picker.launch(arrayOf("*/*")) },
-            onSend = {
-                val text = draft.trim()
-                if (text.isEmpty()) return@Composer
-                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                val replyId = reply?.id
-                draft = ""
-                panel = ""
-                reply = null
-                model.send(text, replyId)
-            },
-            onContent = { uri, _ ->
-                val caption = draft.trim()
-                draft = ""
-                model.attach(listOf(uri), caption, reply?.id)
-                reply = null
-            },
-        )
+        when (conversation?.request) {
+            "incoming" -> Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { model.respond("decline") }) { Text("Decline") }
+                TextButton(onClick = { model.respond("accept") }) { Text("Accept") }
+            }
+            "outgoing" -> Text(
+                "Waiting for acceptance",
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+            else -> Composer(
+                draft = draft,
+                onDraft = {
+                    draft = it
+                    model.typing()
+                },
+                panel = panel,
+                onPanel = { panel = if (panel == it) "" else it },
+                reply = reply?.let { "Reply to ${it.sender}: ${it.previewLabel()}" }.orEmpty(),
+                onClearReply = { reply = null },
+                uploading = uploading,
+                onAttach = { attachChoice = true },
+                onSend = {
+                    val text = draft.trim()
+                    if (text.isEmpty()) return@Composer
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    val replyId = reply?.id
+                    draft = ""
+                    panel = ""
+                    reply = null
+                    model.send(text, replyId) { ok ->
+                        if (!ok && draft.isEmpty()) draft = text
+                    }
+                },
+                onContent = { uri, _ ->
+                    val caption = draft.trim()
+                    draft = ""
+                    model.attach(listOf(uri), caption, reply?.id)
+                    reply = null
+                },
+            )
+        }
     }
     forward?.let { message ->
         ForwardSheet(
@@ -713,6 +669,55 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
             },
         )
     }
+    if (attachChoice) {
+        ModalBottomSheet(onDismissRequest = { attachChoice = false }) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                TextButton(onClick = {
+                    attachChoice = false
+                    picker.launch(arrayOf("*/*"))
+                }) { Text("From this device") }
+                TextButton(onClick = {
+                    attachChoice = false
+                    picking = true
+                }) { Text("From Aird") }
+            }
+        }
+    }
+    if (picking) {
+        AirdPathSheet(
+            mode = AirdPickMode.Attach,
+            onDismiss = { picking = false },
+            onConfirm = { paths ->
+                val caption = draft.trim()
+                draft = ""
+                model.attachPaths(paths, caption, reply?.id)
+                reply = null
+                picking = false
+            },
+        )
+    }
+    saveTarget?.let { (message, attachment) ->
+        AirdPathSheet(
+            mode = AirdPickMode.Save,
+            onDismiss = { saveTarget = null },
+            onConfirm = { paths ->
+                model.saveCopy(message, attachment.index, paths.firstOrNull().orEmpty())
+                saveTarget = null
+            },
+        )
+    }
+}
+
+private fun pinLabel(pin: ChatPin, messages: List<ChatMessage>): String {
+    val loaded = messages.firstOrNull { it.id == pin.messageId }
+    val body = loaded?.body?.trim().orEmpty()
+    if (body.isNotEmpty() && !body.equals("Encrypted message", true)) return body
+    val preview = pin.preview.trim()
+    if (preview.isNotEmpty()) return preview
+    return loaded?.previewLabel() ?: "Pinned message"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

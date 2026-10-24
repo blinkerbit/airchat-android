@@ -13,7 +13,6 @@ import com.aird.chat.model.Conversation
 import com.aird.chat.model.Member
 import com.aird.chat.model.Reaction
 import com.aird.chat.model.ReadReceipt
-import com.aird.chat.model.SearchHit
 import com.aird.chat.model.nowIso
 import com.aird.session.AirdHttp
 import com.aird.session.AirdSocket
@@ -27,7 +26,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import okio.source
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -56,9 +58,6 @@ object ChatRepository {
 
     private val _pins = MutableStateFlow<List<ChatPin>>(emptyList())
     val pins: StateFlow<List<ChatPin>> = _pins
-
-    private val _searchResults = MutableStateFlow<List<SearchHit>>(emptyList())
-    val searchResults: StateFlow<List<SearchHit>> = _searchResults
 
     private val _uploading = MutableStateFlow(false)
     val uploading: StateFlow<Boolean> = _uploading
@@ -140,34 +139,6 @@ object ChatRepository {
             for (i in 0 until array.length()) {
                 val name = array.optJSONObject(i)?.optString("username").orEmpty()
                 if (name.isNotEmpty()) add(name)
-            }
-        }
-    }
-
-    suspend fun search(context: Context, query: String) {
-        val q = query.trim()
-        if (q.length < 2) {
-            _searchResults.value = emptyList()
-            return
-        }
-        val response = AirdHttp.get(context, "/api/chat/search?q=${URLEncoder.encode(q, "UTF-8")}")
-        if (!response.ok) {
-            _error.value = "Search failed"
-            return
-        }
-        val array = response.json().optJSONArray("results") ?: JSONArray()
-        _searchResults.value = buildList {
-            for (i in 0 until array.length()) {
-                val item = array.optJSONObject(i) ?: continue
-                add(
-                    SearchHit(
-                        id = item.optString("id"),
-                        conversationId = item.optString("conversation_id"),
-                        sender = item.optString("sender_username"),
-                        snippet = plain(item.optString("snippet").ifEmpty { item.optString("body") }),
-                        createdAt = item.optString("created_at"),
-                    ),
-                )
             }
         }
     }
@@ -299,11 +270,64 @@ object ChatRepository {
         AirdSocket.send(JSONObject().put("type", "chat_typing").put("conversation_id", convId).toString())
     }
 
-    suspend fun send(context: Context, text: String, replyToId: String?) {
+    suspend fun send(context: Context, text: String, replyToId: String?): Boolean {
         val convId = _activeId.value
         val body = text.trim()
-        if (convId.isEmpty() || body.isEmpty()) return
-        deliverText(context, convId, body, replyToId, optimistic = true)
+        if (convId.isEmpty() || body.isEmpty()) return false
+        return deliverText(context, convId, body, replyToId, optimistic = true)
+    }
+
+    suspend fun retry(context: Context, message: ChatMessage): Boolean {
+        if (!message.failed) return false
+        updateMessages { current ->
+            current.map { item ->
+                if (item.id == message.id) item.copy(pending = true, failed = false) else item
+            }
+        }
+        return deliverText(
+            context,
+            message.conversationId,
+            message.body,
+            message.replyToId.ifBlank { null },
+            optimistic = false,
+            existingLocalId = message.id,
+        )
+    }
+
+    suspend fun respond(context: Context, conversationId: String, action: String): Boolean {
+        val response = AirdHttp.send(
+            context,
+            "/api/chat/conversations/$conversationId/request",
+            "POST",
+            JSONObject().put("action", action),
+        )
+        if (!response.ok) {
+            _error.value = response.json().optString("error", "Could not update the request")
+            return false
+        }
+        if (action == "decline") {
+            close()
+            refresh(context, quiet = true)
+            return true
+        }
+        refresh(context, quiet = true)
+        open(context, conversationId)
+        return true
+    }
+
+    fun clear() {
+        _conversations.value = emptyList()
+        _messages.value = emptyList()
+        _activeId.value = ""
+        _error.value = ""
+        _typing.value = ""
+        _presence.value = emptyMap()
+        _receipts.value = emptyList()
+        _pins.value = emptyList()
+        _uploading.value = false
+        _loadingMore.value = false
+        _hasMore.value = true
+        _pendingOpen.value = ""
     }
 
     suspend fun sendFromNotification(context: Context, conversationId: String, text: String) {
@@ -323,15 +347,78 @@ object ChatRepository {
         val convId = _activeId.value
         if (convId.isEmpty() || uris.isEmpty()) return
         val files = uris.take(10).mapNotNull { uri -> readUri(context, uri) }
-        if (files.size < uris.size && uris.size > 10) _error.value = "Up to 10 files"
+        if (uris.size > 10) _error.value = "Up to 10 files"
         if (files.isEmpty()) return
-        uploadFiles(context, convId, files, caption.trim(), replyToId)
+        uploadFiles(context, convId, files, emptyList(), caption.trim(), replyToId)
+    }
+
+    suspend fun attachPaths(context: Context, paths: List<String>, caption: String, replyToId: String?) {
+        val convId = _activeId.value
+        val chosen = paths.map { it.trim().trimStart('/') }.filter { it.isNotEmpty() }.distinct().take(10)
+        if (convId.isEmpty() || chosen.isEmpty()) return
+        uploadFiles(context, convId, emptyList(), chosen, caption.trim(), replyToId)
     }
 
     suspend fun attachBytes(context: Context, name: String, mime: String, bytes: ByteArray, caption: String, replyToId: String?) {
         val convId = _activeId.value
         if (convId.isEmpty() || bytes.isEmpty()) return
-        uploadFiles(context, convId, listOf(NamedFile(safeName(name, mime), mime, bytes)), caption.trim(), replyToId)
+        val type = mime.ifBlank { "application/octet-stream" }.toMediaType()
+        uploadFiles(
+            context,
+            convId,
+            listOf(UploadPart(safeName(name, mime), mime, bytes.toRequestBody(type))),
+            emptyList(),
+            caption.trim(),
+            replyToId,
+        )
+    }
+
+    suspend fun saveCopy(context: Context, message: ChatMessage, index: Int, destDir: String) {
+        val response = try {
+            AirdHttp.send(
+                context,
+                "/api/chat/conversations/${message.conversationId}/messages/${message.id}/save-copy?i=$index",
+                "POST",
+                JSONObject().put("dest_dir", destDir),
+            )
+        } catch (err: Exception) {
+            _error.value = err.message ?: "Could not save a copy"
+            return
+        }
+        if (!response.ok) {
+            _error.value = response.json().optString("error", "Could not save a copy")
+            return
+        }
+        if (response.json().optBoolean("already_owner")) {
+            _error.value = "You already have this file"
+            return
+        }
+        _error.value = ""
+    }
+
+    suspend fun listFiles(context: Context, path: String): List<AirdEntry> {
+        val clean = path.trim().trim('/')
+        val encoded = if (clean.isEmpty()) {
+            ""
+        } else {
+            clean.split('/').joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+        }
+        val response = try {
+            AirdHttp.get(context, "/api/files/$encoded")
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        if (!response.ok) return emptyList()
+        val files = response.json().optJSONArray("files") ?: return emptyList()
+        return buildList {
+            for (i in 0 until files.length()) {
+                val item = files.optJSONObject(i) ?: continue
+                val name = item.optString("name")
+                if (name.isEmpty()) continue
+                val child = if (clean.isEmpty()) name else "$clean/$name"
+                add(AirdEntry(name, child, item.optBoolean("is_dir")))
+            }
+        }
     }
 
     suspend fun edit(context: Context, message: ChatMessage, text: String) {
@@ -363,6 +450,10 @@ object ChatRepository {
     suspend fun delete(context: Context, message: ChatMessage) {
         if (!message.mine) {
             _error.value = "You can only change your own messages"
+            return
+        }
+        if (message.id.startsWith("local-")) {
+            updateMessages { it.filterNot { item -> item.id == message.id } }
             return
         }
         val response = AirdHttp.send(
@@ -420,12 +511,13 @@ object ChatRepository {
                 } else {
                     val files = message.attachments.mapNotNull { attachment ->
                         val bytes = downloadBytes(context, attachment.url) ?: return@mapNotNull null
-                        NamedFile(safeName(attachment.name, kindMime(attachment.mediaKind)), kindMime(attachment.mediaKind), bytes)
+                        val mime = kindMime(attachment.mediaKind)
+                        UploadPart(safeName(attachment.name, mime), mime, bytes.toRequestBody(mime.toMediaType()))
                     }
                     if (files.isEmpty()) {
                         _error.value = "Could not forward the file"
                     } else {
-                        uploadFiles(context, target, files, message.body, null)
+                        uploadFiles(context, target, files, emptyList(), message.body, null)
                     }
                 }
             }
@@ -471,7 +563,7 @@ object ChatRepository {
                     if (convId == _activeId.value) {
                         updateMessages { current ->
                             val withoutPending = if (item.mine) {
-                                current.filterNot { it.pending && (it.body.trim() == item.body.trim() || it.id.startsWith("local-")) }
+                                current.filterNot { it.pending && it.body.trim() == item.body.trim() }
                             } else current
 
                             val exists = withoutPending.any { it.id == item.id }
@@ -570,29 +662,42 @@ object ChatRepository {
         open(context, id)
     }
 
-    private suspend fun deliverText(context: Context, convId: String, body: String, replyToId: String?, optimistic: Boolean): Boolean {
+    private suspend fun deliverText(
+        context: Context,
+        convId: String,
+        body: String,
+        replyToId: String?,
+        optimistic: Boolean,
+        existingLocalId: String? = null,
+    ): Boolean {
         val sealed = ChatE2E.encrypt(context, convId, body)
         if (sealed == null) {
             _error.value = "This conversation is still locked"
             AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", convId).toString())
+            if (existingLocalId != null) markFailed(existingLocalId)
             return false
         }
         val names = mentionsIn(body, convId)
-        if (optimistic) {
-            val mine = ChatMessage(
-                id = "local-${System.currentTimeMillis()}",
-                conversationId = convId,
-                sender = Session.username.value,
-                body = body,
-                createdAt = nowIso(),
-                mine = true,
-                pending = true,
-                e2e = true,
-                decryptOk = true,
-                replyToId = replyToId.orEmpty(),
-                mentions = names,
-            )
-            updateMessages { it + mine }
+        val localId = if (optimistic) {
+            val id = "local-${System.currentTimeMillis()}"
+            updateMessages {
+                it + ChatMessage(
+                    id = id,
+                    conversationId = convId,
+                    sender = Session.username.value,
+                    body = body,
+                    createdAt = nowIso(),
+                    mine = true,
+                    pending = true,
+                    e2e = true,
+                    decryptOk = true,
+                    replyToId = replyToId.orEmpty(),
+                    mentions = names,
+                )
+            }
+            id
+        } else {
+            existingLocalId
         }
         val socket = JSONObject()
             .put("type", "chat_send")
@@ -600,7 +705,31 @@ object ChatRepository {
             .put("e2e", sealed)
             .put("mentions", JSONArray(names))
         if (!replyToId.isNullOrEmpty()) socket.put("reply_to_id", replyToId)
-        if (AirdSocket.send(socket.toString())) return true
+        if (AirdSocket.send(socket.toString()) && awaitEcho(localId)) return true
+        val posted = postText(context, convId, body, replyToId, sealed, names, localId)
+        if (!posted && localId != null) markFailed(localId)
+        return posted
+    }
+
+    private suspend fun awaitEcho(localId: String?): Boolean {
+        if (localId == null) return true
+        repeat(15) {
+            kotlinx.coroutines.delay(100)
+            val row = _messages.value.firstOrNull { it.id == localId }
+            if (row == null || !row.pending) return true
+        }
+        return false
+    }
+
+    private suspend fun postText(
+        context: Context,
+        convId: String,
+        body: String,
+        replyToId: String?,
+        sealed: JSONObject,
+        names: List<String>,
+        localId: String?,
+    ): Boolean {
         val http = JSONObject()
             .put("type", "text")
             .put("e2e", sealed)
@@ -620,13 +749,35 @@ object ChatRepository {
         if (saved != null && convId == _activeId.value) {
             val item = toMessage(context, saved, Session.username.value)
             updateMessages { current ->
-                current.filterNot { it.pending && it.body == body && it.mine } + item
+                val already = current.any { it.id == item.id }
+                val echoed = localId != null &&
+                    current.none { it.id == localId && it.pending } &&
+                    current.any { !it.pending && it.mine && it.body.trim() == body.trim() }
+                val without = if (localId == null) current else current.filterNot { it.id == localId }
+                if (already || echoed) without else without + item
             }
+        } else if (localId != null) {
+            updateMessages { current -> current.filterNot { it.id == localId } }
         }
         return true
     }
 
-    private suspend fun uploadFiles(context: Context, convId: String, files: List<NamedFile>, caption: String, replyToId: String?) {
+    private fun markFailed(localId: String) {
+        updateMessages { current ->
+            current.map { item ->
+                if (item.id == localId) item.copy(pending = false, failed = true) else item
+            }
+        }
+    }
+
+    private suspend fun uploadFiles(
+        context: Context,
+        convId: String,
+        files: List<UploadPart>,
+        paths: List<String>,
+        caption: String,
+        replyToId: String?,
+    ) {
         _uploading.value = true
         try {
             val sealed = ChatE2E.encrypt(context, convId, caption)
@@ -637,13 +788,18 @@ object ChatRepository {
             val names = mentionsIn(caption, convId)
             val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             files.forEach { file ->
-                val type = file.mime.ifBlank { "application/octet-stream" }.toMediaType()
-                multipart.addFormDataPart("file", file.name, file.bytes.toRequestBody(type))
+                multipart.addFormDataPart("file", file.name, file.body)
             }
+            paths.forEach { path -> multipart.addFormDataPart("source_path", path) }
             multipart.addFormDataPart("e2e", sealed.toString())
             multipart.addFormDataPart("mentions", JSONArray(names).toString())
             if (!replyToId.isNullOrEmpty()) multipart.addFormDataPart("reply_to_id", replyToId)
-            val response = AirdHttp.upload(context, "/api/chat/conversations/$convId/attach", multipart.build())
+            val response = try {
+                AirdHttp.upload(context, "/api/chat/conversations/$convId/attach", multipart.build())
+            } catch (err: Exception) {
+                _error.value = err.message ?: "Could not send the file"
+                return
+            }
             if (!response.ok) {
                 _error.value = response.json().optString("error", "Could not send the file")
                 return
@@ -698,6 +854,7 @@ object ChatRepository {
             muted = item.optBoolean("muted"),
             members = members,
             online = item.optBoolean("online"),
+            request = item.optString("request"),
         )
     }
 
@@ -850,15 +1007,19 @@ object ChatRepository {
         }
     }
 
-    private suspend fun readUri(context: Context, uri: Uri): NamedFile? = withContext(Dispatchers.IO) {
+    private fun readUri(context: Context, uri: Uri): UploadPart? {
         val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
         val name = queryName(context, uri).ifBlank { "file" }
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@withContext null
-        if (bytes.size > 50 * 1024 * 1024) {
-            _error.value = "File is too large"
-            return@withContext null
+        val length = querySize(context, uri)
+        val body = object : RequestBody() {
+            override fun contentType() = mime.toMediaType()
+            override fun contentLength(): Long = length
+            override fun writeTo(sink: BufferedSink) {
+                val input = context.contentResolver.openInputStream(uri) ?: error("Could not read the file")
+                input.use { sink.writeAll(it.source()) }
+            }
         }
-        NamedFile(safeName(name, mime), mime, bytes)
+        return UploadPart(safeName(name, mime), mime, body)
     }
 
     private suspend fun downloadBytes(context: Context, path: String): ByteArray? = try {
@@ -870,6 +1031,16 @@ object ChatRepository {
         }
     } catch (_: Exception) {
         null
+    }
+
+    private fun querySize(context: Context, uri: Uri): Long {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index >= 0 && !cursor.isNull(index)) return cursor.getLong(index)
+            }
+        }
+        return -1L
     }
 
     private fun queryName(context: Context, uri: Uri): String {
@@ -919,5 +1090,7 @@ object ChatRepository {
         }
     }
 
-    private data class NamedFile(val name: String, val mime: String, val bytes: ByteArray)
+    private data class UploadPart(val name: String, val mime: String, val body: RequestBody)
 }
+
+data class AirdEntry(val name: String, val path: String, val dir: Boolean)

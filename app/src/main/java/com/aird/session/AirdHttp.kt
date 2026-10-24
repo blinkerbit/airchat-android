@@ -33,6 +33,11 @@ object AirdHttp {
         .readTimeout(40, TimeUnit.SECONDS)
         .build()
 
+    private val uploadClient: OkHttpClient = client.newBuilder()
+        .writeTimeout(30, TimeUnit.MINUTES)
+        .readTimeout(10, TimeUnit.MINUTES)
+        .build()
+
     suspend fun get(context: Context, path: String): AirdResponse = request(context, path, "GET", null)
 
     suspend fun send(context: Context, path: String, method: String, body: JSONObject): AirdResponse =
@@ -49,7 +54,7 @@ object AirdHttp {
                 .post(body)
             val token = xsrf(ServerStore.get(context))
             if (token.isNotEmpty()) builder.header("X-XSRFToken", token)
-            client.newCall(builder.build()).execute().use { response ->
+            uploadClient.newCall(builder.build()).execute().use { response ->
                 AirdResponse(response.code, response.body.string())
             }
         }

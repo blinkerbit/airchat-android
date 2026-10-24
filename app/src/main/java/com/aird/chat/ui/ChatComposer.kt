@@ -28,9 +28,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -55,6 +57,7 @@ private val Emoji = listOf(
     "☕", "🍕", "🚀", "📷", "🎵", "💬", "📞", "📍", "✅", "❌", "🤝", "💐",
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Composer(
     draft: String,
@@ -88,14 +91,23 @@ fun Composer(
         if (uploading) {
             Text("Sending file…", modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = MaterialTheme.colorScheme.primary)
         }
+        val canSend = draft.isNotBlank() && !uploading
         androidx.compose.foundation.layout.Row(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))
+                .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onAttach) { Icon(Icons.Default.AttachFile, contentDescription = "Attach") }
-            IconButton(onClick = { onPanel("emoji") }) { Icon(Icons.Default.EmojiEmotions, contentDescription = "Emoji") }
+            IconButton(onClick = onAttach, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.AttachFile, contentDescription = "Attach")
+            }
+            IconButton(onClick = { onPanel("emoji") }, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.EmojiEmotions, contentDescription = "Emoji")
+            }
             AndroidView(
-                modifier = Modifier.weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp)).padding(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
                 factory = { context ->
                     EditText(context).apply {
                         background = null
@@ -104,6 +116,8 @@ fun Composer(
                         minLines = 1
                         maxLines = 5
                         imeOptions = EditorInfo.IME_ACTION_SEND
+                        fitsSystemWindows = false
+                        ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets -> insets }
                         setOnEditorActionListener { _, actionId, _ ->
                             if (actionId == EditorInfo.IME_ACTION_SEND) {
                                 onSend()
@@ -135,13 +149,25 @@ fun Composer(
                     }
                 },
             )
-            PressIconButton(onClick = onSend) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary) }
+            PressIconButton(onClick = onSend, modifier = Modifier.size(40.dp), enabled = canSend) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Send",
+                    tint = if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+                )
+            }
         }
-        AnimatedVisibility(visible = panel == "emoji", enter = panelEnter, exit = panelExit) {
-            LazyVerticalGrid(columns = GridCells.Fixed(8), modifier = Modifier.fillMaxWidth().height(240.dp), contentPadding = PaddingValues(8.dp)) {
+    }
+    if (panel == "emoji") {
+        ModalBottomSheet(onDismissRequest = { onPanel("") }) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(8),
+                modifier = Modifier.fillMaxWidth().height(280.dp),
+                contentPadding = PaddingValues(8.dp),
+            ) {
                 items(Emoji) { item ->
                     Box(
-                        Modifier.size(40.dp).clickable(enabled = panel == "emoji") { onDraft(draft + item) },
+                        Modifier.size(40.dp).clickable { onDraft(draft + item) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(item, fontSize = 24.sp)
