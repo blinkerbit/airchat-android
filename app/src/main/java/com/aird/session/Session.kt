@@ -5,6 +5,7 @@ import android.webkit.CookieManager
 import com.aird.AirdConnectionService
 import com.aird.ServerStore
 import com.aird.chat.data.ChatE2E
+import com.aird.chat.data.ChatNotifier
 import com.aird.chat.data.ChatRepository
 import com.aird.chat.data.UnreadBadge
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,6 +49,7 @@ object Session {
         CookieManager.getInstance().removeAllCookies(null)
         CookieManager.getInstance().flush()
         UnreadBadge.apply(context, 0)
+        ChatNotifier.forget(context)
         ChatRepository.clear()
         ChatE2E.clear()
         AirdSocket.stop()

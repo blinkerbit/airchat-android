@@ -33,6 +33,7 @@ object ChatNotifier {
         preview: String,
         mine: Boolean = false,
         messageId: String = "",
+        alert: Boolean = !mine,
     ) {
         val text = when {
             preview.isBlank() || preview == "Encrypted message" -> "New message"
@@ -94,9 +95,9 @@ object ChatNotifier {
             .setContentIntent(content)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setVibrate(longArrayOf(0, 250, 250, 250))
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // Our own reply refreshes the card without sounding again.
+            .setOnlyAlertOnce(!alert)
             .setAutoCancel(true)
             .addAction(replyAction)
             .addAction(android.R.drawable.ic_menu_view, "Mark read", readPending)
@@ -107,7 +108,39 @@ object ChatNotifier {
 
     fun cancel(context: Context, conversationId: String) {
         if (conversationId.isEmpty()) return
+        // Old lines must not come back inside the next card.
+        synchronized(history) { history.remove(conversationId) }
         context.getSystemService(NotificationManager::class.java).cancel(conversationId.hashCode())
+    }
+
+    private const val LEDGER = "aird_notify_ledger"
+
+    private fun ledger(context: Context) =
+        context.applicationContext.getSharedPreferences(LEDGER, Context.MODE_PRIVATE)
+
+    /** True once we have recorded where every chat stood at least once. */
+    fun hasLedger(context: Context): Boolean = ledger(context).all.isNotEmpty()
+
+    /** The `updated_at` of a chat the last time we alerted for it or looked at it. */
+    fun seen(context: Context, conversationId: String): String? =
+        ledger(context).getString(conversationId, null)
+
+    fun remember(context: Context, stamps: List<Pair<String, String>>) {
+        val prefs = ledger(context)
+        val edit = prefs.edit()
+        var changed = false
+        stamps.forEach { (id, at) ->
+            if (id.isNotEmpty() && prefs.getString(id, null) != at) {
+                edit.putString(id, at)
+                changed = true
+            }
+        }
+        if (changed) edit.apply()
+    }
+
+    fun forget(context: Context) {
+        ledger(context).edit().clear().apply()
+        synchronized(history) { history.clear() }
     }
 
     private fun publishShortcut(

@@ -1,26 +1,29 @@
 package com.aird
 
-import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.aird.session.AirdSocket
-import org.json.JSONObject
+import com.aird.chat.data.ChatNotifier
+import com.aird.chat.data.ChatRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MarkAsReadReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val conversationId = intent.getStringExtra(KEY_CONVERSATION_ID) ?: return
-        context.getSystemService(NotificationManager::class.java).cancel(conversationId.hashCode())
+        ChatNotifier.cancel(context, conversationId)
         val messageId = intent.getStringExtra(KEY_MESSAGE_ID).orEmpty()
         if (messageId.isEmpty()) return
-        AirdSocket.send(
-            JSONObject()
-                .put("type", "chat_read")
-                .put("conversation_id", conversationId)
-                .put("message_id", messageId)
-                .put("decrypted", true)
-                .toString(),
-        )
+        val pending = goAsync()
+        val app = context.applicationContext
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                ChatRepository.sendRead(app, conversationId, messageId, decrypted = true)
+            } finally {
+                pending.finish()
+            }
+        }
     }
 
     companion object {

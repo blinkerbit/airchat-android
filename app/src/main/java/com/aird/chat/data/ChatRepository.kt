@@ -29,7 +29,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -123,7 +122,7 @@ object ChatRepository {
         flushOutbox(context)
     }
 
-    suspend fun refresh(context: Context, quiet: Boolean = false) {
+    suspend fun refresh(context: Context, quiet: Boolean = false, catchUp: Boolean = false) {
         rememberApp(context)
         val response = try {
             AirdHttp.get(context, "/api/chat/conversations")
@@ -142,6 +141,8 @@ object ChatRepository {
                 add(toConversation(context, item))
             }
         }
+        if (catchUp) notifyMissed(context, items)
+        ChatNotifier.remember(context, items.map { it.id to it.updatedAt })
         _conversations.value = items
         val presenceMap = mutableMapOf<String, Boolean>()
         items.forEach { conv ->
@@ -157,6 +158,28 @@ object ChatRepository {
         _presence.value = _presence.value + presenceMap
         _error.value = ""
         publishUnreadBadge()
+    }
+
+    /**
+     * The socket was down, so no live alert fired for what arrived meanwhile.
+     * Raise one for each chat that moved since we last looked.
+     */
+    private fun notifyMissed(context: Context, items: List<Conversation>) {
+        if (AppForeground.resumed()) return
+        val known = ChatNotifier.hasLedger(context)
+        items.forEach { conv ->
+            if (conv.unread <= 0 || conv.muted || conv.request.isNotEmpty()) return@forEach
+            val seen = ChatNotifier.seen(context, conv.id)
+            if (seen == null && !known) return@forEach
+            if (seen == conv.updatedAt) return@forEach
+            ChatNotifier.show(
+                context,
+                conv.id,
+                conv.name(),
+                conv.peer.ifEmpty { conv.name() },
+                conv.preview.ifBlank { "New message" },
+            )
+        }
     }
 
     suspend fun searchUsers(context: Context, query: String): List<String> {
@@ -300,7 +323,14 @@ object ChatRepository {
         if (!resyncing.compareAndSet(false, true)) return
         try {
             rememberApp(context)
-            refresh(context, quiet = true)
+            // The service can come back on its own after the app process died.
+            if (Session.username.value.isEmpty() && !Session.probe(context)) return
+            try {
+                ChatE2E.prepare(context, Session.username.value)
+            } catch (err: Exception) {
+                if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+            }
+            refresh(context, quiet = true, catchUp = true)
             flushOutbox(context)
             val convId = _activeId.value
             if (convId.isEmpty()) return
@@ -713,39 +743,89 @@ object ChatRepository {
         _pins.value = pinsOf(response.json().optJSONArray("pins"))
     }
 
+    /**
+     * Forward by pointer on the server: files and media are never downloaded or
+     * re-uploaded. Encrypted messages carry a fresh ciphertext per target.
+     */
     suspend fun forward(context: Context, message: ChatMessage, targets: List<String>) {
-        if (targets.isEmpty()) return
+        val ids = targets.distinct()
+        if (ids.isEmpty()) return
+        if (message.pending || message.failed || message.id.startsWith("local-") || message.id.isEmpty()) {
+            _error.value = "Wait until the message is sent"
+            return
+        }
+        val sendTo = ids.toMutableList()
+        val skipped = mutableListOf<String>()
+        val payload = JSONObject()
         if (message.e2e) {
             if (!message.decryptOk || message.body == "Encrypted message") {
                 _error.value = "Unlock the message before forwarding it"
                 return
             }
-            targets.forEach { target ->
-                if (message.attachments.isEmpty()) {
-                    deliverText(context, target, message.body, null, optimistic = target == _activeId.value)
+            val sealed = JSONObject()
+            for (target in ids) {
+                val box = try {
+                    ChatE2E.encrypt(context, target, message.body)
+                } catch (err: Exception) {
+                    if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                    null
+                }
+                if (box == null) {
+                    skipped += "${conversationLabel(target)}: still locked"
+                    AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", target).toString())
                 } else {
-                    val files = message.attachments.mapNotNull { attachment ->
-                        val bytes = downloadBytes(context, attachment.url) ?: return@mapNotNull null
-                        val mime = kindMime(attachment.mediaKind)
-                        UploadPart(safeName(attachment.name, mime), mime, bytes.toRequestBody(mime.toMediaType()))
-                    }
-                    if (files.isEmpty()) {
-                        _error.value = "Could not forward the file"
-                    } else {
-                        uploadFiles(context, target, files, emptyList(), message.body, null)
-                    }
+                    sealed.put(target, box)
                 }
             }
+            sendTo.removeAll { !sealed.has(it) }
+            payload.put("e2e", sealed)
+        }
+        if (sendTo.isEmpty()) {
+            _error.value = "Not forwarded: " + skipped.joinToString("; ")
             return
         }
-        val response = AirdHttp.send(
-            context,
-            "/api/chat/conversations/${message.conversationId}/messages/${message.id}/forward",
-            "POST",
-            JSONObject().put("conversation_ids", JSONArray(targets)),
-        )
-        if (!response.ok) _error.value = response.json().optString("error", "Could not forward")
+        payload.put("conversation_ids", JSONArray(sendTo))
+        val response = try {
+            AirdHttp.send(
+                context,
+                "/api/chat/conversations/${pathEncode(message.conversationId)}/messages/${pathEncode(message.id)}/forward",
+                "POST",
+                payload,
+            )
+        } catch (err: Exception) {
+            if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+            _error.value = err.message ?: "Could not forward"
+            return
+        }
+        if (!response.ok) {
+            _error.value = response.json().optString("error", "Could not forward")
+            return
+        }
+        val results = response.json().optJSONArray("results")
+        var done = 0
+        if (results != null) {
+            for (i in 0 until results.length()) {
+                val row = results.optJSONObject(i) ?: continue
+                if (row.optBoolean("ok")) {
+                    done += 1
+                } else {
+                    val id = row.optString("conversation_id")
+                    skipped += "${conversationLabel(id)}: ${row.optString("error", "failed")}"
+                }
+            }
+        } else {
+            done = sendTo.size
+        }
+        _error.value = when {
+            skipped.isEmpty() -> if (done == 1) "Forwarded" else "Forwarded to $done chats"
+            done == 0 -> "Not forwarded: " + skipped.joinToString("; ")
+            else -> "Forwarded to $done. Not forwarded: " + skipped.joinToString("; ")
+        }
+        refresh(context, quiet = true)
     }
+
+    private fun conversationLabel(id: String): String =
+        _conversations.value.firstOrNull { it.id == id }?.name() ?: "this chat"
 
     suspend fun mute(context: Context, conversationId: String, muted: Boolean) {
         val response = AirdHttp.send(
@@ -808,13 +888,22 @@ object ChatRepository {
                 if (looking) return
                 val sender = data.optString("sender", "Aird")
                 val title = _conversations.value.firstOrNull { it.id == convId }?.name() ?: sender
-                val preview = data.optString("preview", "New message")
-                ChatNotifier.show(context, convId, title, sender, preview)
+                val messageId = data.optString("message_id")
+                val sealed = data.optJSONObject("e2e")
+                val files = data.optInt("attachments")
                 scope.launch {
+                    // The server only sees ciphertext. Use the chat key when we have it.
+                    val clear = if (sealed != null) ChatE2E.decrypt(context, convId, sealed) else null
+                    val preview = when {
+                        clear != null && clear.isNotBlank() -> plain(clear)
+                        sealed != null && files > 0 -> if (files == 1) "Shared a file" else "Shared $files files"
+                        else -> data.optString("preview", "New message")
+                    }
+                    ChatNotifier.show(context, convId, title, sender, preview, messageId = messageId)
                     if (preview.isNotBlank()) {
                         touchConversation(context, convId, preview = preview, updatedAt = nowIso())
                     }
-                    bumpUnreadIfNeeded(context, convId, mine = false)
+                    // chat_message already counted this one. The refresh settles the total.
                     refresh(context, quiet = true)
                 }
             }
@@ -1188,14 +1277,34 @@ object ChatRepository {
         val convId = _activeId.value
         if (message == null || convId.isEmpty() || message.pending || message.id.startsWith("local-")) return
         val decrypted = !message.e2e || message.decryptOk
-        AirdSocket.send(
+        val ctx = appContext ?: return
+        scope.launch { sendRead(ctx, convId, message.id, decrypted) }
+    }
+
+    /** Socket first. Plain HTTP when the socket is down, so a read is never lost. */
+    suspend fun sendRead(context: Context, convId: String, messageId: String, decrypted: Boolean) {
+        val sent = AirdSocket.send(
             JSONObject()
                 .put("type", "chat_read")
                 .put("conversation_id", convId)
-                .put("message_id", message.id)
+                .put("message_id", messageId)
                 .put("decrypted", decrypted)
                 .toString(),
         )
+        if (!sent) {
+            try {
+                AirdHttp.send(
+                    context,
+                    "/api/chat/conversations/${pathEncode(convId)}/read",
+                    "POST",
+                    JSONObject().put("message_id", messageId).put("decrypted", decrypted),
+                )
+            } catch (err: Exception) {
+                if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                return
+            }
+        }
+        touchConversation(context, convId, unread = 0)
     }
 
     private fun rememberApp(context: Context) {
@@ -1468,19 +1577,6 @@ object ChatRepository {
         return UploadPart(safeName(name, mime), mime, body)
     }
 
-    private suspend fun downloadBytes(context: Context, path: String): ByteArray? = try {
-        withContext(Dispatchers.IO) {
-            val url = AirdHttp.absolute(context, path)
-            val builder = okhttp3.Request.Builder().url(url)
-            AirdHttp.attachWebViewCookies(builder, context, url)
-            AirdHttp.client.newCall(builder.build()).execute().use { response ->
-                if (!response.isSuccessful) null else response.body.bytes()
-            }
-        }
-    } catch (_: Exception) {
-        null
-    }
-
     private fun querySize(context: Context, uri: Uri): Long {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
@@ -1506,12 +1602,6 @@ object ChatRepository {
         val cleaned = base.filter { it.isLetterOrDigit() || it in "._- " }.take(80).trim().ifBlank { "file" }
         val gif = mime.equals("image/gif", true) || cleaned.endsWith(".gif", true)
         return if (gif && !cleaned.endsWith(".gif", true)) "$cleaned.gif" else cleaned
-    }
-
-    private fun kindMime(kind: String): String = when (kind) {
-        "gif" -> "image/gif"
-        "image" -> "image/jpeg"
-        else -> "application/octet-stream"
     }
 
     private fun plain(raw: String): String {
