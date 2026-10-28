@@ -1,16 +1,19 @@
 package com.aird.call
 
+import android.Manifest
 import android.app.ActivityOptions
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.aird.AirdConnectionService
 import com.aird.AppForeground
 import com.aird.MainActivity
@@ -87,6 +90,13 @@ object CallController {
     val backgroundOnly: StateFlow<Boolean> = _backgroundOnly
 
     private const val RING_WINDOW_MS = 47_000L
+    // The server calls it missed at 47s. This only covers a lost server event.
+    private const val OUTGOING_WINDOW_MS = 52_000L
+    private val _micNeeded = MutableStateFlow(false)
+    /** True while an answer waits for the microphone permission prompt. */
+    val micNeeded: StateFlow<Boolean> = _micNeeded
+    private var answerWithCamera = false
+    @Volatile private var app: Context? = null
     private val silenced = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private var room: Room? = null
     private var events: Job? = null
@@ -117,7 +127,20 @@ object CallController {
         _bubble.value = Drag(x, y)
     }
 
+    fun hasMicrophone(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    /** Result of the permission prompt. Without a microphone we still join, muted. */
+    fun microphoneAnswered(context: Context, granted: Boolean) {
+        if (!_micNeeded.value) return
+        _micNeeded.value = false
+        val camera = answerWithCamera
+        answerWithCamera = false
+        accept(context, camera, micChecked = true)
+    }
+
     fun onEvent(context: Context, raw: String) {
+        app = context.applicationContext
         val data = try {
             JSONObject(raw)
         } catch (_: Exception) {
@@ -189,6 +212,25 @@ object CallController {
                     telecomCause = DisconnectCause.REJECTED,
                 )
             }
+            "call_missed" -> {
+                if (callId.isNotEmpty()) silenced.add(callId)
+                val current = _snapshot.value
+                if (!same(current, conv)) return
+                if (callId.isNotEmpty() && current.callId.isNotEmpty() && callId != current.callId) return
+                when (current.phase) {
+                    CallPhase.Outgoing -> finish(context, "No answer", signal = false, shade = null, telecomCause = DisconnectCause.MISSED)
+                    CallPhase.Incoming -> finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
+                    else -> Unit
+                }
+            }
+            "call_answered" -> {
+                // Another device of ours picked up. This one stops ringing quietly.
+                if (callId.isNotEmpty()) silenced.add(callId)
+                val current = _snapshot.value
+                if (current.phase != CallPhase.Incoming || !same(current, conv)) return
+                if (callId.isNotEmpty() && current.callId.isNotEmpty() && callId != current.callId) return
+                finish(context, "", signal = false, shade = null, telecomCause = DisconnectCause.ANSWERED_ELSEWHERE)
+            }
             "call_end", "call_ended" -> {
                 val current = _snapshot.value
                 // Remember it so a late or replayed invite for this call never rings.
@@ -254,7 +296,9 @@ object CallController {
     }
 
     fun start(context: Context, conversationId: String, peer: String, mode: String) {
+        app = context.applicationContext
         if (_snapshot.value.phase != CallPhase.Idle) return
+        val startedIn = generation
         _snapshot.value = CallSnapshot(
             phase = CallPhase.Outgoing,
             conversationId = conversationId,
@@ -281,16 +325,37 @@ object CallController {
                 }
                 val callId = response.json().optString("call_id")
                 _snapshot.value = _snapshot.value.copy(callId = callId)
+                watchOutgoing(context, startedIn, callId)
                 connect(context, response.json().optString("url"), response.json().optString("token"), mode == "video")
             } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
                 finish(context, err.message ?: "Call failed", signal = false, shade = null)
             }
         }
     }
 
-    fun accept(context: Context, withCamera: Boolean = false) {
+    /** Nobody picked up. Hang up for the caller and stop the other ring. */
+    private fun watchOutgoing(context: Context, startedIn: Int, callId: String) {
+        scope.launch {
+            delay(OUTGOING_WINDOW_MS)
+            val current = _snapshot.value
+            if (generation == startedIn && current.phase == CallPhase.Outgoing && current.callId == callId) {
+                finish(context, "No answer", signal = true, shade = null, telecomCause = DisconnectCause.MISSED)
+            }
+        }
+    }
+
+    fun accept(context: Context, withCamera: Boolean = false, micChecked: Boolean = false) {
+        app = context.applicationContext
         val current = _snapshot.value
         if (current.phase != CallPhase.Incoming) return
+        if (!micChecked && !hasMicrophone(context)) {
+            // Ask first. Joining without the permission used to fail the whole call.
+            answerWithCamera = withCamera
+            _micNeeded.value = true
+            launchIncomingCallActivity(context)
+            return
+        }
         if (current.callId.isNotEmpty()) silenced.add(current.callId)
         stopRing()
         dismiss(context, current.conversationId)
@@ -575,13 +640,47 @@ object CallController {
             next.events.collect { event -> if (gen == generation) onRoomEvent(context, event) }
         }
         next.connect(url, token)
-        next.localParticipant.setMicrophoneEnabled(true)
-        if (camera) next.localParticipant.setCameraEnabled(true)
+        // A blocked microphone or camera must not fail the call. Join listen-only instead.
+        var hint = ""
+        val micOn = hasMicrophone(context) && try {
+            next.localParticipant.setMicrophoneEnabled(true)
+            true
+        } catch (err: Exception) {
+            if (err is kotlinx.coroutines.CancellationException) throw err
+            false
+        }
+        if (!micOn) {
+            _snapshot.value = _snapshot.value.copy(muted = true)
+            hint = "Microphone is off. Allow it in Settings to talk."
+        }
+        var cameraOn = camera
+        if (camera) {
+            cameraOn = try {
+                next.localParticipant.setCameraEnabled(true)
+                true
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                false
+            }
+            if (!cameraOn && hint.isEmpty()) hint = "Camera is off. Allow it in Settings to share video."
+        }
         val output = _snapshot.value.output.ifEmpty { if (video) "speaker" else "earpiece" }
         val playback = _snapshot.value.playbackId.ifEmpty { output }
-        _snapshot.value = _snapshot.value.copy(speaker = output == "speaker", cameraOn = camera, output = output, playbackId = playback)
+        _snapshot.value = _snapshot.value.copy(
+            speaker = output == "speaker",
+            cameraOn = cameraOn,
+            output = output,
+            playbackId = playback,
+            routeHint = hint.ifEmpty { _snapshot.value.routeHint },
+        )
+        if (hint.isNotEmpty()) {
+            scope.launch {
+                delay(6000)
+                if (_snapshot.value.routeHint == hint) _snapshot.value = _snapshot.value.copy(routeHint = "")
+            }
+        }
         CallDevices.applyOutput(context, next, playback)
-        AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video, camera)
+        AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video, cameraOn)
         if (next.remoteParticipants.isNotEmpty()) markConnected(context)
     }
 
@@ -662,8 +761,11 @@ object CallController {
     }
 
     private fun finish(context: Context, message: String, signal: Boolean, shade: String?, telecomCause: Int = DisconnectCause.LOCAL) {
+        app = context.applicationContext
         val current = _snapshot.value
         if (current.phase == CallPhase.Idle && current.status.isEmpty() && message.isEmpty()) return
+        _micNeeded.value = false
+        answerWithCamera = false
         _pipClose.value = _pipClose.value + 1
         _backgroundOnly.value = false
         CallDevices.cancelRoutes()
@@ -719,7 +821,25 @@ object CallController {
         if (conversationId.isEmpty()) return
         val payload = JSONObject().put("type", type).put("conversation_id", conversationId).put("call_id", callId)
         if (!mode.isNullOrEmpty()) payload.put("mode", mode)
-        AirdSocket.send(payload.toString())
+        if (AirdSocket.send(payload.toString())) return
+        // The socket is down. A lost decline or end leaves the other side ringing, so go over HTTP.
+        val context = app ?: return
+        scope.launch {
+            repeat(4) { attempt ->
+                try {
+                    val response = AirdHttp.send(
+                        context,
+                        "/api/chat/conversations/$conversationId/call/signal",
+                        "POST",
+                        payload,
+                    )
+                    if (response.ok || response.code in 400..499) return@launch
+                } catch (err: Exception) {
+                    if (err is kotlinx.coroutines.CancellationException) throw err
+                }
+                delay(1000L shl attempt)
+            }
+        }
     }
 
     private fun missedTitle(mode: String): String = if (mode == "video") "Missed video call" else "Missed voice call"

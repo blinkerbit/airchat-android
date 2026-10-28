@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.util.Rational
 import android.app.NotificationManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -310,6 +311,13 @@ private fun AirdRoot() {
     val pip by MainActivity.inPip.collectAsState()
     val backgroundOnly by CallController.backgroundOnly.collectAsState()
     val closePip by CallController.pipClose.collectAsState()
+    val micNeeded by CallController.micNeeded.collectAsState()
+    val micPrompt = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        CallController.microphoneAnswered(context, granted)
+    }
+    LaunchedEffect(micNeeded) {
+        if (micNeeded) micPrompt.launch(Manifest.permission.RECORD_AUDIO)
+    }
     LaunchedEffect(closePip) {
         if (closePip == 0) return@LaunchedEffect
         (context as? MainActivity)?.leaveCallPip()

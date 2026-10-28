@@ -50,7 +50,11 @@ class AirdConnectionService : Service() {
                 val video = intent.getStringExtra(EXTRA_MODE) == "video"
                 val camera = intent.getBooleanExtra(EXTRA_CAMERA, video)
                 val peer = intent.getStringExtra(EXTRA_PEER).orEmpty().ifEmpty { "Aird Chat" }
-                startAs(ongoingCall(peer, video), remoteOnly = false, video = camera)
+                // Without the microphone or camera permission the typed start throws. Degrade instead of crashing.
+                val full = tryStart(ongoingCall(peer, video), remoteOnly = false, video = camera)
+                if (!full && !tryStart(ongoingCall(peer, video), remoteOnly = false, video = false)) {
+                    tryStart(plainOngoing(peer, "In call"), remoteOnly = true, includeCall = false)
+                }
             }
             "ringing" -> {
                 val conv = intent.getStringExtra(EXTRA_CONVERSATION).orEmpty()
