@@ -12,6 +12,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
@@ -43,6 +44,22 @@ object AirdHttp {
     suspend fun send(context: Context, path: String, method: String, body: JSONObject): AirdResponse =
         request(context, path, method, body)
 
+    suspend fun postRaw(context: Context, path: String, file: File, headers: Map<String, String>): AirdResponse =
+        withContext(Dispatchers.IO) {
+            CookieManager.getInstance().flush()
+            val builder = Request.Builder()
+                .url(absolute(context, path))
+                .header("Accept", "*/*")
+                .header("Origin", ServerStore.get(context))
+            headers.forEach { (key, value) -> builder.header(key, value) }
+            val token = xsrf(ServerStore.get(context))
+            if (token.isNotEmpty()) builder.header("X-XSRFToken", token)
+            builder.post(file.asRequestBody("application/octet-stream".toMediaType()))
+            uploadClient.newCall(builder.build()).execute().use { response ->
+                AirdResponse(response.code, response.body.string())
+            }
+        }
+
     suspend fun upload(context: Context, path: String, body: RequestBody): AirdResponse =
         withContext(Dispatchers.IO) {
             CookieManager.getInstance().flush()
@@ -59,19 +76,56 @@ object AirdHttp {
             }
         }
 
-    suspend fun saveTo(context: Context, path: String, dest: File): String = withContext(Dispatchers.IO) {
+    suspend fun saveTo(
+        context: Context,
+        path: String,
+        dest: File,
+        onProgress: (bytes: Long, total: Long) -> Unit = { _, _ -> },
+    ): String = withContext(Dispatchers.IO) {
         CookieManager.getInstance().flush()
         dest.parentFile?.mkdirs()
-        val request = Request.Builder()
-            .url(absolute(context, path))
+        val url = absolute(context, path)
+        val builder = Request.Builder()
+            .url(url)
             .header("Accept", "*/*")
             .header("Cache-Control", "no-cache")
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) error("Could not open the file")
-            dest.outputStream().use { out -> response.body.byteStream().copyTo(out) }
-            response.header("Content-Type").orEmpty().substringBefore(';').trim()
+            .header("Origin", ServerStore.get(context))
+        attachWebViewCookies(builder, context, url)
+        try {
+            client.newCall(builder.build()).execute().use { response ->
+                if (!response.isSuccessful) error("Could not open the file (${response.code})")
+                val body = response.body
+                val length = body.contentLength()
+                val total = if (length >= 0) length else -1L
+                var sent = 0L
+                onProgress(sent, total)
+                body.byteStream().use { input ->
+                    dest.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            sent += n
+                            onProgress(sent, total)
+                        }
+                    }
+                }
+                if (!dest.exists() || dest.length() == 0L) error("Empty file")
+                response.header("Content-Type").orEmpty().substringBefore(';').trim()
+            }
+        } catch (err: Exception) {
+            dest.delete()
+            throw err
         }
+    }
+
+    internal fun attachWebViewCookies(builder: Request.Builder, context: Context, url: String) {
+        val manager = CookieManager.getInstance()
+        val server = ServerStore.get(context)
+        val cookie = manager.getCookie(url)?.takeIf { it.isNotBlank() }
+            ?: manager.getCookie(server)?.takeIf { it.isNotBlank() }
+        if (cookie != null) builder.header("Cookie", cookie)
     }
 
     private suspend fun request(context: Context, path: String, method: String, body: JSONObject?): AirdResponse =
@@ -112,10 +166,18 @@ private class AndroidCookieJar : CookieJar {
     }
 
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val header = CookieManager.getInstance().getCookie(url.toString()) ?: return emptyList()
+        val manager = CookieManager.getInstance()
+        val header = manager.getCookie(url.toString())
+            ?: manager.getCookie("${url.scheme}://${url.host}")
+            ?: return emptyList()
         return header.split(';').mapNotNull { part ->
             val trimmed = part.trim()
-            if (trimmed.isEmpty()) null else Cookie.parse(url, trimmed)
+            if (trimmed.isEmpty() || trimmed.contains('=').not()) return@mapNotNull null
+            val name = trimmed.substringBefore('=').trim()
+            if (name.equals("Path", true) || name.equals("Expires", true) || name.equals("Max-Age", true)) {
+                return@mapNotNull null
+            }
+            Cookie.parse(url, trimmed)
         }
     }
 }

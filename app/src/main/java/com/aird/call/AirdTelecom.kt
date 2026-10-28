@@ -72,6 +72,33 @@ object AirdTelecom {
         }
     }
 
+    fun reportConnected(context: Context, peer: String, video: Boolean) {
+        onMain {
+            val live = connection
+            if (live != null) {
+                live.setActive()
+                return@onMain
+            }
+            val app = context.applicationContext
+            if (reporting) return@onMain
+            register(app)
+            val telecom = app.getSystemService(TelecomManager::class.java) ?: return@onMain
+            val extras = Bundle().apply {
+                putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle(app))
+                putParcelable(TelecomManager.EXTRA_INCOMING_CALL_ADDRESS, address(peer))
+                putBoolean(EXTRA_VIDEO, video)
+                putBoolean(EXTRA_ACTIVE, true)
+                putString(EXTRA_LABEL, if (video) "$peer, video call" else "$peer, voice call")
+            }
+            reporting = true
+            try {
+                telecom.addNewIncomingCall(handle(app), extras)
+            } catch (_: Exception) {
+                reporting = false
+            }
+        }
+    }
+
     fun reportIncoming(context: Context, peer: String, video: Boolean) {
         onMain {
             val app = context.applicationContext
@@ -82,6 +109,7 @@ object AirdTelecom {
                 putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle(app))
                 putParcelable(TelecomManager.EXTRA_INCOMING_CALL_ADDRESS, address(peer))
                 putBoolean(EXTRA_VIDEO, video)
+                putString(EXTRA_LABEL, if (video) "$peer, video call" else "$peer, voice call")
             }
             reporting = true
             try {
@@ -121,7 +149,8 @@ object AirdTelecom {
         connection?.release(DisconnectCause.OTHER)
         connection = call
         reporting = false
-        if (outgoing) call.setDialing() else call.setRinging()
+        val active = request?.extras?.getBoolean(EXTRA_ACTIVE) == true
+        if (active) call.setActive() else if (outgoing) call.setDialing() else call.setRinging()
         return call
     }
 
@@ -161,6 +190,8 @@ object AirdTelecom {
 
     private const val ACCOUNT_ID = "aird"
     const val EXTRA_VIDEO = "video"
+    const val EXTRA_LABEL = "label"
+    const val EXTRA_ACTIVE = "active"
 }
 
 private class AirdCallConnection(
@@ -174,7 +205,8 @@ private class AirdCallConnection(
         audioModeIsVoip = true
         val target = request?.address ?: Uri.fromParts(PhoneAccount.SCHEME_SIP, "aird", null)
         setAddress(target, TelecomManager.PRESENTATION_ALLOWED)
-        setCallerDisplayName(target.schemeSpecificPart ?: "Aird", TelecomManager.PRESENTATION_ALLOWED)
+        val label = request?.extras?.getString(AirdTelecom.EXTRA_LABEL)
+        setCallerDisplayName(label ?: target.schemeSpecificPart ?: "Aird", TelecomManager.PRESENTATION_ALLOWED)
         val video = request?.extras?.getBoolean(AirdTelecom.EXTRA_VIDEO) == true
         if (video) videoState = VideoProfile.STATE_BIDIRECTIONAL
     }
@@ -187,6 +219,11 @@ private class AirdCallConnection(
             destroy()
         } catch (_: Exception) {
         }
+    }
+
+    override fun onShowIncomingCallUi() {
+        if (released) return
+        CallController.launchIncomingCallActivity(app)
     }
 
     override fun onAnswer() {

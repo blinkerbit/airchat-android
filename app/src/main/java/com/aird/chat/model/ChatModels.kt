@@ -40,6 +40,8 @@ data class ChatAttachment(
     val url: String,
     val mediaKind: String,
     val index: Int,
+    val shareUrl: String = "",
+    val ownerRel: String = "",
 ) {
     fun visual(): Boolean = mediaKind == "image" || mediaKind == "gif"
 

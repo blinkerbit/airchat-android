@@ -40,9 +40,12 @@ fun AirdPathSheet(
     val context = LocalContext.current
     var path by remember { mutableStateOf("") }
     var entries by remember { mutableStateOf<List<AirdEntry>>(emptyList()) }
+    var failed by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf(setOf<String>()) }
     LaunchedEffect(path) {
-        entries = ChatRepository.listFiles(context, path)
+        val listed = ChatRepository.listFiles(context, path)
+        failed = listed == null
+        entries = listed.orEmpty()
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -58,6 +61,16 @@ fun AirdPathSheet(
                 TextButton(onClick = {
                     path = path.substringBeforeLast('/', "")
                 }) { Text("Up") }
+            }
+            TextButton(
+                onClick = {
+                    if (mode == AirdPickMode.Save) onConfirm(listOf(path))
+                    else onConfirm(picked.toList())
+                },
+                enabled = mode == AirdPickMode.Save || picked.isNotEmpty(),
+            ) { Text(if (mode == AirdPickMode.Save) "Save here" else "Attach") }
+            if (failed) {
+                Text("Could not load this folder", modifier = Modifier.padding(bottom = 8.dp))
             }
             LazyColumn(Modifier.fillMaxWidth().height(320.dp)) {
                 items(entries, key = { it.path }) { entry ->
@@ -82,13 +95,6 @@ fun AirdPathSheet(
                     }
                 }
             }
-            TextButton(
-                onClick = {
-                    if (mode == AirdPickMode.Save) onConfirm(listOf(path))
-                    else onConfirm(picked.toList())
-                },
-                enabled = mode == AirdPickMode.Save || picked.isNotEmpty(),
-            ) { Text(if (mode == AirdPickMode.Save) "Save here" else "Attach") }
         }
     }
 }

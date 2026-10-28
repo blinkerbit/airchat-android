@@ -26,7 +26,15 @@ class IncomingCallReceiver : BroadcastReceiver() {
                 context.startActivity(open)
                 CallController.accept(context)
             }
-            ACTION_DECLINE -> CallController.decline(context)
+            ACTION_DECLINE -> {
+                CallController.restoreIncoming(
+                    intent.getStringExtra(KEY_CONVERSATION).orEmpty(),
+                    intent.getStringExtra(KEY_CALL).orEmpty(),
+                    intent.getStringExtra(KEY_MODE).orEmpty(),
+                    intent.getStringExtra(KEY_FROM).orEmpty(),
+                )
+                CallController.decline(context)
+            }
             ACTION_HANGUP -> CallController.hangUp(context)
             ACTION_MUTE -> CallController.toggleMute()
             ACTION_EXPAND -> {
@@ -45,6 +53,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
         const val ACTION_HANGUP = "com.aird.ACTION_HANGUP_CALL"
         const val ACTION_MUTE = "com.aird.ACTION_MUTE_CALL"
         const val ACTION_EXPAND = "com.aird.ACTION_EXPAND_CALL"
+        const val ACTION_HIDE = "com.aird.ACTION_HIDE_CALL"
         const val KEY_CONVERSATION = "key_conversation_id"
         const val KEY_CALL = "key_call_id"
         const val KEY_MODE = "key_call_mode"

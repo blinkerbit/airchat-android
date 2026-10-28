@@ -3,16 +3,15 @@ package com.aird.chat.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import android.os.Build
-import android.webkit.MimeTypeMap
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -32,11 +31,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -51,12 +52,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.ClickableText
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
@@ -65,7 +72,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.FileProvider
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
@@ -84,11 +90,8 @@ import java.time.Instant
 import com.aird.session.AirdHttp
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.enterRiseModifier
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val Reactions = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
@@ -174,56 +177,64 @@ fun MessageRow(
     var viewer by remember(message.id) { mutableStateOf<ChatAttachment?>(null) }
     val mine = message.mine
     val shown = if (settling) settle.value else dragX
-    Row(
-        Modifier.fillMaxWidth()
-            .then(enterRiseModifier(message.id, enter))
-            .offset { IntOffset(shown.roundToInt(), 0) }
-            .pointerInput(message.id, reduced) {
-                fun easeBack() {
-                    val from = dragX
-                    val token = gesture
-                    if (reduced) {
-                        dragX = 0f
-                        settling = false
-                        return
-                    }
-                    scope.launch {
-                        settle.snapTo(from)
-                        if (token != gesture) return@launch
-                        settling = true
-                        try {
-                            settle.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
-                        } finally {
-                            if (token == gesture) {
-                                dragX = 0f
-                                settling = false
-                            }
-                        }
-                    }
+    fun easeSwipeBack() {
+        val from = dragX
+        val token = gesture
+        if (reduced) {
+            dragX = 0f
+            settling = false
+            return
+        }
+        scope.launch {
+            settle.snapTo(from)
+            if (token != gesture) return@launch
+            settling = true
+            try {
+                settle.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+            } finally {
+                if (token == gesture) {
+                    dragX = 0f
+                    settling = false
                 }
-                detectHorizontalDragGestures(
-                    onDragStart = {
-                        gesture += 1
-                        dragX = if (settling) settle.value else dragX
-                        settling = false
-                        scope.launch { settle.stop() }
-                    },
-                    onHorizontalDrag = { _, drag -> dragX = (dragX + drag).coerceIn(-180f, 180f) },
-                    onDragEnd = {
-                        val trigger = kotlin.math.abs(dragX) > 72.dp.toPx()
-                        easeBack()
-                        if (trigger) onReply()
-                    },
-                    onDragCancel = { easeBack() },
-                )
-            },
+            }
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth().then(enterRiseModifier(message.id, enter)),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
     ) {
-        Column(horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
+        Column(
+            Modifier.fillMaxWidth(),
+            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+        ) {
             if (!mine) {
                 Text(message.sender, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 2.dp))
             }
-            Box {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .offset { IntOffset(shown.roundToInt(), 0) }
+                    .replySwipeGestures(
+                        messageId = message.id,
+                        reduced = reduced,
+                        failed = message.failed,
+                        onLongPress = { menu = true },
+                        onRetry = onRetry,
+                        onDrag = { dragX = it },
+                        onRelease = { offset, trigger ->
+                            if (trigger) onReply()
+                            dragX = offset
+                            easeSwipeBack()
+                        },
+                        onDragStart = {
+                            gesture += 1
+                            dragX = if (settling) settle.value else dragX
+                            settling = false
+                            scope.launch { settle.stop() }
+                        },
+                    ),
+                contentAlignment = if (mine) Alignment.CenterEnd else Alignment.CenterStart,
+            ) {
                 if (message.sticker()) {
                     Text(
                         message.body.trim(),
@@ -238,11 +249,9 @@ fun MessageRow(
                         mine = mine,
                         highlighted = highlighted,
                         onQuoteClick = onQuoteClick,
-                        onLongPress = { menu = true },
-                        onRetry = onRetry,
                         onOpen = { viewer = it },
                         onFile = { attachment ->
-                            openAttachment(context, attachment)
+                            scope.launch { downloadChatAttachment(context, message.id, attachment) }
                         },
                     )
                 }
@@ -270,12 +279,27 @@ fun MessageRow(
                         if (canEdit) SheetAction("Edit") { menu = false; editing = true }
                         if (message.mine) SheetAction("Delete") { menu = false; confirmDelete = true }
                         if (message.attachments.isNotEmpty()) {
-                            if (message.attachments.size == 1) {
-                                SheetAction("Save a copy") { menu = false; onSave(message.attachments.first()) }
-                            } else {
-                                message.attachments.forEach { attachment ->
-                                    SheetAction("Save ${attachment.name}") { menu = false; onSave(attachment) }
+                            message.attachments.forEach { attachment ->
+                                val suffix = if (message.attachments.size > 1) " ${attachment.name}" else ""
+                                SheetAction("Download$suffix") {
+                                    menu = false
+                                    scope.launch { downloadChatAttachment(context, message.id, attachment) }
                                 }
+                                SheetAction("Save to device$suffix") {
+                                    menu = false
+                                    scope.launch { saveChatAttachmentToDevice(context, message.id, attachment) }
+                                }
+                                SheetAction("Open$suffix") {
+                                    menu = false
+                                    scope.launch { openChatAttachment(context, message.id, attachment) }
+                                }
+                                if (attachment.shareUrl.isNotBlank()) {
+                                    SheetAction("Open in Aird") {
+                                        menu = false
+                                        openAirdShareInBrowser(context, attachment.shareUrl)
+                                    }
+                                }
+                                SheetAction("Save to Aird$suffix") { menu = false; onSave(attachment) }
                             }
                         }
                         SheetAction(if (pinned) "Unpin" else "Pin") { menu = false; onPin() }
@@ -345,7 +369,7 @@ fun MessageRow(
         )
     }
     viewer?.let { attachment ->
-        MediaViewer(attachment, onDismiss = { viewer = null })
+        MediaViewer(message.id, attachment, onDismiss = { viewer = null })
     }
 }
 
@@ -357,8 +381,6 @@ private fun Bubble(
     mine: Boolean,
     highlighted: Boolean,
     onQuoteClick: (String) -> Unit,
-    onLongPress: () -> Unit,
-    onRetry: () -> Unit,
     onOpen: (ChatAttachment) -> Unit,
     onFile: (ChatAttachment) -> Unit,
 ) {
@@ -375,12 +397,6 @@ private fun Bubble(
         Modifier.widthIn(max = 300.dp)
             .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = if (mine) 18.dp else 4.dp, bottomEnd = if (mine) 4.dp else 18.dp))
             .background(animatedBg)
-            .pointerInput(message.id, message.failed) {
-                detectTapGestures(
-                    onLongPress = { onLongPress() },
-                    onTap = { if (message.failed) onRetry() },
-                )
-            }
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
         if (message.forwarded) Text("Forwarded", color = fg.copy(alpha = 0.7f), fontSize = 12.sp)
@@ -403,28 +419,38 @@ private fun Bubble(
         message.attachments.forEach { attachment ->
             val gestures = Modifier.pointerInput(message.id, attachment.url) {
                 detectTapGestures(
-                    onLongPress = { onLongPress() },
                     onTap = {
                         if (attachment.visual() || attachment.video()) onOpen(attachment) else onFile(attachment)
                     },
                 )
             }
-            if (attachment.visual()) {
-                AttachmentImage(
-                    attachment,
-                    Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)).then(gestures),
-                )
-            } else {
-                Text(
-                    attachment.name,
-                    color = fg,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = gestures.padding(vertical = 4.dp),
-                )
+            Column(Modifier.fillMaxWidth()) {
+                if (attachment.visual()) {
+                    AttachmentImage(
+                        attachment,
+                        Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)).then(gestures),
+                    )
+                } else {
+                    Column(modifier = gestures.padding(vertical = 4.dp)) {
+                        Text(
+                            "📎 ${attachment.name}",
+                            color = fg,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "Tap to download",
+                            color = fg.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                AttachmentProgressBar(message.id, attachment.index, fg)
             }
         }
         if (message.body.isNotBlank() && message.body != "Encrypted message" || message.attachments.isEmpty()) {
-            if (message.body.isNotBlank()) Text(highlight(message.body, fg), color = fg, fontSize = 16.sp)
+            if (message.body.isNotBlank()) {
+                MessageBodyText(message.body, fg, mine)
+            }
         }
     }
 }
@@ -531,7 +557,23 @@ private fun AttachmentImage(attachment: ChatAttachment, modifier: Modifier) {
 }
 
 @Composable
-private fun MediaViewer(attachment: ChatAttachment, onDismiss: () -> Unit) {
+private fun AttachmentProgressBar(messageId: String, index: Int, color: Color) {
+    val progress by ChatDownloads.progress.collectAsState()
+    val item = progress[ChatDownloads.key(messageId, index)] ?: return
+    val modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+    if (item.total > 0) {
+        LinearProgressIndicator(
+            progress = { (item.bytes.toFloat() / item.total.toFloat()).coerceIn(0f, 1f) },
+            modifier = modifier,
+            color = color,
+        )
+    } else {
+        LinearProgressIndicator(modifier = modifier, color = color)
+    }
+}
+
+@Composable
+private fun MediaViewer(messageId: String, attachment: ChatAttachment, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var scale by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
@@ -560,9 +602,33 @@ private fun MediaViewer(attachment: ChatAttachment, onDismiss: () -> Unit) {
                     contentScale = ContentScale.Fit,
                 )
             }
-            Row(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
-                Text("Open", color = Color.White, modifier = Modifier.clickable { openAttachment(context, attachment) }.padding(12.dp))
-                Text("Close", color = Color.White, modifier = Modifier.clickable(onClick = onDismiss).padding(12.dp))
+            val scope = rememberCoroutineScope()
+            Column(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+                Row {
+                    Text(
+                        "Download",
+                        color = Color.White,
+                        modifier = Modifier.clickable {
+                            scope.launch { downloadChatAttachment(context, messageId, attachment) }
+                        }.padding(12.dp),
+                    )
+                    Text(
+                        "Save",
+                        color = Color.White,
+                        modifier = Modifier.clickable {
+                            scope.launch { saveChatAttachmentToDevice(context, messageId, attachment) }
+                        }.padding(12.dp),
+                    )
+                    Text(
+                        "Open",
+                        color = Color.White,
+                        modifier = Modifier.clickable {
+                            scope.launch { openChatAttachment(context, messageId, attachment) }
+                        }.padding(12.dp),
+                    )
+                    Text("Close", color = Color.White, modifier = Modifier.clickable(onClick = onDismiss).padding(12.dp))
+                }
+                AttachmentProgressBar(messageId, attachment.index, Color.White)
             }
         }
     }
@@ -596,43 +662,114 @@ private fun VideoPlayer(attachment: ChatAttachment) {
     )
 }
 
-private fun highlight(text: String, color: Color) = buildAnnotatedString {
-    val regex = Regex("@([A-Za-z0-9_.\\-@]+)")
+@Composable
+private fun MessageBodyText(text: String, fg: Color, mine: Boolean) {
+    val context = LocalContext.current
+    val linkColor = if (mine) fg.copy(alpha = 0.92f) else MaterialTheme.colorScheme.primary
+    val annotated = remember(text, fg, linkColor) { buildMessageText(text, fg, linkColor) }
+    ClickableText(
+        text = annotated,
+        style = TextStyle(color = fg, fontSize = 16.sp),
+        onClick = { offset ->
+            annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { span ->
+                openHttpUrl(context, span.item)
+            }
+        },
+    )
+}
+
+private fun buildMessageText(text: String, fg: Color, linkColor: Color): AnnotatedString = buildAnnotatedString {
+    val mentionRegex = Regex("@([A-Za-z0-9_.\\-@]+)")
+    val urlRegex = Regex("""https?://[^\s<>"']+""")
+    val hits = mutableListOf<Pair<Int, String>>()
+    mentionRegex.findAll(text).forEach { hits.add(it.range.first to "m:${it.range.first}:${it.range.last + 1}") }
+    urlRegex.findAll(text).forEach { m ->
+        val start = m.range.first
+        val end = m.range.last + 1
+        val insideMention = mentionRegex.findAll(text).any { start >= it.range.first && end <= it.range.last + 1 }
+        if (!insideMention) hits.add(start to "u:$start:$end")
+    }
+    hits.sortBy { it.first }
     var index = 0
-    regex.findAll(text).forEach { match ->
-        append(text.substring(index, match.range.first))
-        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = color)) { append(match.value) }
-        index = match.range.last + 1
+    for ((start, token) in hits) {
+        if (start < index) continue
+        if (start > index) append(text.substring(index, start))
+        when {
+            token.startsWith("m:") -> {
+                val parts = token.split(':')
+                val from = parts[1].toInt()
+                val to = parts[2].toInt()
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = fg)) { append(text.substring(from, to)) }
+                index = to
+            }
+            token.startsWith("u:") -> {
+                val parts = token.split(':')
+                val from = parts[1].toInt()
+                val to = parts[2].toInt()
+                val raw = text.substring(from, to)
+                val url = raw.trimEnd('.', ',', ';', ')')
+                pushStringAnnotation("URL", url)
+                withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) { append(raw) }
+                pop()
+                index = to
+            }
+        }
     }
     if (index < text.length) append(text.substring(index))
 }
 
-private fun openAttachment(context: Context, attachment: ChatAttachment) {
-    CoroutineScope(Dispatchers.IO).launch {
-        try {
-            val dir = File(context.cacheDir, "chat-files").apply { mkdirs() }
-            val dest = File(dir, safeFile(attachment.name))
-            val header = AirdHttp.saveTo(context, attachment.url, dest)
-            val mime = header.ifBlank { guessMime(dest.name, attachment.mediaKind) }
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dest)
-            val view = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mime)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+private fun Modifier.replySwipeGestures(
+    messageId: String,
+    reduced: Boolean,
+    failed: Boolean,
+    onLongPress: () -> Unit,
+    onRetry: () -> Unit,
+    onDrag: (Float) -> Unit,
+    onRelease: (offset: Float, triggerReply: Boolean) -> Unit,
+    onDragStart: () -> Unit,
+): Modifier = pointerInput(messageId, reduced, failed) {
+    if (reduced) return@pointerInput
+    val replyThreshold = 72.dp.toPx()
+    val maxDrag = 180.dp.toPx()
+    val touchSlop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val pointerId = down.id
+        var offsetX = 0f
+        var offsetY = 0f
+        var horizontal = false
+        var longPressFired = false
+        val startedAt = System.currentTimeMillis()
+        onDragStart()
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+            if (!change.pressed) break
+            val delta = change.positionChange()
+            offsetX += delta.x
+            offsetY += delta.y
+            if (!horizontal && !longPressFired &&
+                System.currentTimeMillis() - startedAt >= viewConfiguration.longPressTimeoutMillis &&
+                abs(offsetX) < touchSlop && abs(offsetY) < touchSlop
+            ) {
+                longPressFired = true
+                onLongPress()
             }
-            withContext(Dispatchers.Main) { context.startActivity(view) }
-        } catch (_: Exception) {
+            if (!horizontal) {
+                if (abs(offsetX) > touchSlop && abs(offsetX) > abs(offsetY) * 1.05f) {
+                    horizontal = true
+                }
+            }
+            if (horizontal) {
+                change.consume()
+                onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
+            }
+        }
+        if (horizontal) {
+            val trigger = abs(offsetX) > replyThreshold
+            onRelease(offsetX, trigger)
+        } else if (!longPressFired && abs(offsetX) < touchSlop && abs(offsetY) < touchSlop) {
+            if (failed) onRetry()
         }
     }
-}
-
-private fun safeFile(name: String): String {
-    val cleaned = name.substringAfterLast('/').filter { it.isLetterOrDigit() || it in "._-" }.take(80)
-    return cleaned.ifBlank { "file" }
-}
-
-private fun guessMime(name: String, kind: String): String {
-    if (kind == "gif" || name.endsWith(".gif", true)) return "image/gif"
-    if (kind == "image") return "image/*"
-    val ext = name.substringAfterLast('.', "")
-    return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase()).orEmpty().ifBlank { "application/octet-stream" }
 }

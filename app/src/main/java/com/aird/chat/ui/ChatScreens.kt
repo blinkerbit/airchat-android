@@ -17,6 +17,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,7 +50,10 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import com.aird.SharedContent
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -91,12 +96,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aird.MainActivity
 import com.aird.call.CallController
 import com.aird.call.CallPhase
 import com.aird.chat.data.ChatRepository
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
 import com.aird.chat.model.ChatPin
+import com.aird.chat.data.UnreadBadge
 import com.aird.chat.model.Conversation
 import com.aird.chat.model.filterConversations
 import com.aird.chat.model.seenLabel
@@ -116,14 +123,21 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     val active by model.activeId.collectAsState()
     val error by model.error.collectAsState()
     val call by CallController.snapshot.collectAsState()
+    val pip by MainActivity.inPip.collectAsState()
+    val backgroundOnly by CallController.backgroundOnly.collectAsState()
     val pending by ChatRepository.pendingOpen.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var themeMenu by remember { mutableStateOf(false) }
     var sheet by remember { mutableStateOf(false) }
+    var addMember by remember { mutableStateOf(false) }
+    var confirmLeave by remember { mutableStateOf(false) }
     val themeId by ThemeStore.id.collectAsState()
     val openChat = conversations.firstOrNull { it.id == active }
 
     LaunchedEffect(Unit) { model.refresh() }
+    LaunchedEffect(conversations) {
+        UnreadBadge.apply(context, conversations.sumOf { it.unread })
+    }
     LaunchedEffect(pending) {
         if (pending.isEmpty()) return@LaunchedEffect
         val id = pending
@@ -134,6 +148,8 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         sheet = false
         menu = false
         themeMenu = false
+        addMember = false
+        confirmLeave = false
     }
 
     Scaffold(
@@ -197,6 +213,22 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                     model.mute(openChat?.muted != true)
                                 },
                             )
+                            if (openChat?.kind == "group") {
+                                DropdownMenuItem(
+                                    text = { Text("Add member") },
+                                    onClick = {
+                                        menu = false
+                                        addMember = true
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Leave group") },
+                                    onClick = {
+                                        menu = false
+                                        confirmLeave = true
+                                    },
+                                )
+                            }
                         }
                     }
                 },
@@ -204,14 +236,14 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            if (call.minimized && call.phase != CallPhase.Idle && call.mode != "video") {
+            if (call.minimized && call.phase != CallPhase.Idle && !pip && (call.mode != "video" || backgroundOnly)) {
                 Row(
                     Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary).clickable { CallController.expand() }.padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(Icons.Default.Call, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
                     Text(
-                        "Voice call with ${call.peer}",
+                        if (call.mode == "video") "Video call with ${call.peer}" else "Voice call with ${call.peer}",
                         color = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.padding(start = 10.dp).weight(1f),
                     )
@@ -238,7 +270,28 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
             }
         }
     }
+    val pendingShare by MainActivity.sharedContent.collectAsState()
     if (sheet) NewChatSheet(model, onDismiss = { sheet = false })
+    if (addMember && openChat?.kind == "group") {
+        AddMemberDialog(model, onDismiss = { addMember = false })
+    }
+    if (confirmLeave && openChat?.kind == "group") {
+        AlertDialog(
+            onDismissRequest = { confirmLeave = false },
+            title = { Text("Leave group") },
+            text = { Text("Leave this group?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLeave = false
+                    model.leaveGroup()
+                }) { Text("Leave") }
+            },
+            dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("Cancel") } },
+        )
+    }
+    pendingShare?.let { shared ->
+        ShareToAirdSheet(shared = shared, model = model, onDismiss = { MainActivity.sharedContent.value = null })
+    }
 }
 
 @Composable
@@ -437,6 +490,20 @@ private fun ConversationList(items: List<Conversation>, model: ChatViewModel) {
     }
 }
 
+private data class ChatScrollPosition(val index: Int, val offset: Int)
+
+private object ChatScrollStore {
+    private val positions = mutableMapOf<String, ChatScrollPosition>()
+
+    fun get(conversationId: String): ChatScrollPosition? = positions[conversationId]
+
+    fun save(conversationId: String, index: Int, offset: Int) {
+        if (conversationId.isNotEmpty() && index >= 0) {
+            positions[conversationId] = ChatScrollPosition(index, offset)
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Thread(model: ChatViewModel, conversation: Conversation?) {
@@ -445,7 +512,25 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
     val pins by model.pins.collectAsState()
     val uploading by model.uploading.collectAsState()
     val me by Session.username.collectAsState()
-    val listState = rememberLazyListState()
+
+    val conversationId = conversation?.id.orEmpty()
+    val savedPosition = remember(conversationId) { ChatScrollStore.get(conversationId) }
+    val initialIndex = remember(conversationId) {
+        val saved = ChatScrollStore.get(conversationId)
+        if (saved != null && saved.index < messages.size) {
+            saved.index
+        } else {
+            (messages.lastIndex).coerceAtLeast(0)
+        }
+    }
+    val initialOffset = remember(conversationId) {
+        ChatScrollStore.get(conversationId)?.offset ?: 0
+    }
+
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = initialIndex,
+        initialFirstVisibleItemScrollOffset = initialOffset,
+    )
     var draft by remember { mutableStateOf("") }
     var panel by remember { mutableStateOf("") }
     var reply by remember { mutableStateOf<ChatMessage?>(null) }
@@ -479,9 +564,19 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
     }
     val loadingMore by model.loadingMore.collectAsState()
     val hasMore by model.hasMore.collectAsState()
-    var initialScrollDone by remember(conversation?.id) { mutableStateOf(false) }
+    var initialScrollDone by remember(conversationId) { mutableStateOf(false) }
 
-    val entering = enteringMessageIds(conversation?.id.orEmpty(), messages)
+    val entering = enteringMessageIds(conversationId, messages)
+
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+        if (conversationId.isNotEmpty() && listState.layoutInfo.totalItemsCount > 0) {
+            ChatScrollStore.save(
+                conversationId,
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+            )
+        }
+    }
 
     LaunchedEffect(listState.firstVisibleItemIndex) {
         if (listState.firstVisibleItemIndex <= 2 && hasMore && !loadingMore && messages.isNotEmpty()) {
@@ -521,13 +616,22 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
         }
     }
 
-    LaunchedEffect(messages.lastOrNull()?.id, ime) {
+    LaunchedEffect(conversationId, messages.size, ime) {
         if (messages.isEmpty()) return@LaunchedEffect
-        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: messages.lastIndex
-        val nearEnd = !initialScrollDone || lastVisible >= messages.lastIndex - 2
-        if (nearEnd) {
+        if (!initialScrollDone) {
             initialScrollDone = true
-            listState.scrollToItem(messages.lastIndex)
+            val saved = ChatScrollStore.get(conversationId)
+            if (saved != null && saved.index < messages.size) {
+                listState.scrollToItem(saved.index, saved.offset)
+            } else {
+                listState.scrollToItem(messages.lastIndex)
+            }
+        } else {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: messages.lastIndex
+            val nearEnd = lastVisible >= messages.lastIndex - 2
+            if (nearEnd) {
+                listState.scrollToItem(messages.lastIndex)
+            }
         }
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))) {
@@ -704,7 +808,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
             mode = AirdPickMode.Save,
             onDismiss = { saveTarget = null },
             onConfirm = { paths ->
-                model.saveCopy(message, attachment.index, paths.firstOrNull().orEmpty())
+                model.saveCopy(message, attachment, paths.firstOrNull().orEmpty())
                 saveTarget = null
             },
         )
@@ -718,6 +822,66 @@ private fun pinLabel(pin: ChatPin, messages: List<ChatMessage>): String {
     val preview = pin.preview.trim()
     if (preview.isNotEmpty()) return preview
     return loaded?.previewLabel() ?: "Pinned message"
+}
+
+@Composable
+private fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var chosen by remember { mutableStateOf("") }
+    val people by model.people.collectAsState()
+    LaunchedEffect(query) {
+        delay(200)
+        model.lookup(query)
+    }
+    val name = chosen.trim().ifBlank { query.trim() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add member") },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = {
+                        query = it
+                        chosen = ""
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Username") },
+                    singleLine = true,
+                )
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(top = 8.dp),
+                ) {
+                    people.forEach { username ->
+                        Text(
+                            username,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    chosen = username
+                                    query = username
+                                }
+                                .padding(vertical = 8.dp),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (name.isNotEmpty()) model.addMember(name)
+                    onDismiss()
+                },
+                enabled = name.isNotEmpty(),
+            ) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -845,6 +1009,114 @@ private fun ForwardSheet(conversations: List<Conversation>, onDismiss: () -> Uni
                 }
             }
             TextButton(onClick = { onSend(picked.toList()) }, enabled = picked.isNotEmpty()) { Text("Send") }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShareToAirdSheet(
+    shared: SharedContent,
+    model: ChatViewModel,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val conversations by model.conversations.collectAsState()
+    var query by remember { mutableStateOf("") }
+    var selectedIds by remember { mutableStateOf(setOf<String>()) }
+    val scope = rememberCoroutineScope()
+
+    val filtered = remember(query, conversations) {
+        if (query.isBlank()) conversations
+        else conversations.filter { it.name().contains(query, ignoreCase = true) }
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Text(
+                "Share to Aird Chat",
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            if (shared.uris.isNotEmpty()) {
+                Text(
+                    "📎 ${shared.uris.size} file(s) selected",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+            }
+            if (shared.text.isNotEmpty()) {
+                Text(
+                    "\"${shared.text.take(80)}\"",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                placeholder = { Text("Search chat or contact") },
+                singleLine = true,
+                shape = RoundedCornerShape(20.dp)
+            )
+
+            LazyColumn(Modifier.fillMaxWidth().height(240.dp).padding(top = 8.dp)) {
+                items(filtered, key = { it.id }) { conv ->
+                    val isSelected = conv.id in selectedIds
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selectedIds = if (isSelected) selectedIds - conv.id else selectedIds + conv.id
+                            }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Avatar(conv.name(), 40)
+                        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                            Text(conv.name(), fontWeight = FontWeight.SemiBold)
+                        }
+                        if (isSelected) {
+                            Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            Button(
+                onClick = {
+                    val targets = selectedIds.toList()
+                    onDismiss()
+                    scope.launch {
+                        targets.forEach { targetId ->
+                            if (shared.uris.isNotEmpty()) {
+                                model.attachTo(targetId, shared.uris, shared.text)
+                            } else if (shared.text.isNotEmpty()) {
+                                model.sendTo(targetId, shared.text)
+                            }
+                            model.open(targetId)
+                        }
+                    }
+                },
+                enabled = selectedIds.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+            ) {
+                Text("Send to ${selectedIds.size} chat(s)", fontWeight = FontWeight.Bold)
+            }
         }
     }
 }

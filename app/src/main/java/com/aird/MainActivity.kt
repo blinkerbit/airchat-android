@@ -51,6 +51,11 @@ import com.aird.ui.LoginScreen
 import com.aird.ui.theme.AirdTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 
+data class SharedContent(
+    val text: String = "",
+    val uris: List<Uri> = emptyList(),
+)
+
 class MainActivity : ComponentActivity() {
     private var privilegeStep = 0
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -63,6 +68,7 @@ class MainActivity : ComponentActivity() {
                     CallController.expand()
                     leaveCallPip()
                 }
+                IncomingCallReceiver.ACTION_HIDE -> hideCallToBackground()
             }
         }
     }
@@ -70,18 +76,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-                android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-            )
-        }
+        setupLockscreenFlags()
         AppForeground.install()
         ThemeStore.load(this)
         ContextCompat.registerReceiver(
@@ -91,6 +86,7 @@ class MainActivity : ComponentActivity() {
                 addAction(IncomingCallReceiver.ACTION_MUTE)
                 addAction(IncomingCallReceiver.ACTION_HANGUP)
                 addAction(IncomingCallReceiver.ACTION_EXPAND)
+                addAction(IncomingCallReceiver.ACTION_HIDE)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
@@ -108,19 +104,52 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        setupLockscreenFlags()
         askPrivileges()
+        com.aird.session.AirdSocket.ensureConnected()
+        val call = CallController.snapshot.value
+        if (call.phase == CallPhase.Incoming) {
+            AirdConnectionService.showRinging(
+                this,
+                conversationId = call.conversationId,
+                callId = call.callId,
+                peer = call.peer,
+                mode = call.mode,
+                alert = false,
+            )
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        setupLockscreenFlags()
         handleIntent(intent)
+    }
+
+    fun setupLockscreenFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+            android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+            keyguardManager?.requestDismissKeyguard(this, null)
+        }
     }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         val call = CallController.snapshot.value
-        if (call.phase == CallPhase.Live && call.mode == "video") enterCallPip()
+        val active = call.phase == CallPhase.Live || call.phase == CallPhase.Outgoing || call.phase == CallPhase.Joining
+        if (active && !call.minimized) enterCallPip()
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
@@ -133,27 +162,40 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) updatePipParams()
     }
 
-    fun enterCallPip() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || isInPictureInPictureMode) return
+    fun enterCallPip(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        if (isInPictureInPictureMode) return true
         val call = CallController.snapshot.value
-        if (call.phase != CallPhase.Live && call.phase != CallPhase.Outgoing && call.phase != CallPhase.Joining) return
+        if (call.phase != CallPhase.Live && call.phase != CallPhase.Outgoing && call.phase != CallPhase.Joining) return false
         CallController.expand()
-        enterPictureInPictureMode(pipParams())
+        return try {
+            enterPictureInPictureMode(pipParams())
+        } catch (_: IllegalStateException) {
+            false
+        }
+    }
+
+    fun hideCallToBackground() {
+        CallController.hideBackground()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) updatePipParams()
+        moveTaskToBack(true)
     }
 
     private fun pipParams(): PictureInPictureParams {
+        val call = CallController.snapshot.value
         val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-        val ratio = if (portrait) Rational(9, 16) else Rational(16, 9)
-        val builder = PictureInPictureParams.Builder().setAspectRatio(ratio).setActions(
-            listOf(
-                pipAction(IncomingCallReceiver.ACTION_MUTE, "Mute", android.R.drawable.ic_lock_silent_mode),
-                pipAction(IncomingCallReceiver.ACTION_HANGUP, "End", android.R.drawable.ic_menu_close_clear_cancel),
-                pipAction(IncomingCallReceiver.ACTION_EXPAND, "Maximize", android.R.drawable.ic_menu_crop),
-            ),
+        val ratio = if (call.mode == "video" && portrait) Rational(9, 16) else Rational(16, 9)
+        val actions = mutableListOf(
+            pipAction(IncomingCallReceiver.ACTION_EXPAND, "Maximize", android.R.drawable.ic_menu_crop),
+            pipAction(IncomingCallReceiver.ACTION_HIDE, "Hide", android.R.drawable.arrow_down_float),
+            pipAction(IncomingCallReceiver.ACTION_HANGUP, "End", android.R.drawable.ic_menu_close_clear_cancel),
         )
+        val limit = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) maxNumPictureInPictureActions else actions.size
+        if (limit > 3) actions.add(1, pipAction(IncomingCallReceiver.ACTION_MUTE, "Mute", android.R.drawable.ic_lock_silent_mode))
+        val builder = PictureInPictureParams.Builder().setAspectRatio(ratio).setActions(actions.take(limit.coerceAtLeast(1)))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val call = CallController.snapshot.value
-            builder.setAutoEnterEnabled(call.phase == CallPhase.Live && call.mode == "video")
+            val active = call.phase == CallPhase.Live || call.phase == CallPhase.Outgoing || call.phase == CallPhase.Joining
+            builder.setAutoEnterEnabled(active && !call.minimized)
         }
         return builder.build()
     }
@@ -202,6 +244,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        val action = intent?.action
+        if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) {
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            val uris = mutableListOf<Uri>()
+            if (action == Intent.ACTION_SEND) {
+                @Suppress("DEPRECATION")
+                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                if (uri != null) uris.add(uri)
+            } else {
+                @Suppress("DEPRECATION")
+                val list = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                if (list != null) uris.addAll(list.filterNotNull())
+            }
+            if (sharedText.isNotEmpty() || uris.isNotEmpty()) {
+                sharedContent.value = SharedContent(text = sharedText, uris = uris)
+            }
+        }
         when (intent?.getStringExtra("action")) {
             "open_chat" -> ChatRepository.requestOpen(intent.getStringExtra("conversation_id").orEmpty())
             "accept_call" -> {
@@ -213,12 +272,24 @@ class MainActivity : ComponentActivity() {
                 )
                 CallController.accept(this)
             }
+            "expand_call" -> {
+                CallController.expand()
+                leaveCallPip()
+            }
             "incoming_call" -> {
-                CallController.restoreIncoming(
-                    intent.getStringExtra("conversation_id").orEmpty(),
-                    intent.getStringExtra("call_id").orEmpty(),
-                    intent.getStringExtra("call_mode").orEmpty(),
-                    intent.getStringExtra("call_from").orEmpty(),
+                setupLockscreenFlags()
+                val conversationId = intent.getStringExtra("conversation_id").orEmpty()
+                val callId = intent.getStringExtra("call_id").orEmpty()
+                val mode = intent.getStringExtra("call_mode").orEmpty()
+                val from = intent.getStringExtra("call_from").orEmpty()
+                CallController.restoreIncoming(conversationId, callId, mode, from)
+                AirdConnectionService.showRinging(
+                    this,
+                    conversationId = conversationId,
+                    callId = callId,
+                    peer = from,
+                    mode = mode,
+                    alert = false,
                 )
             }
         }
@@ -226,6 +297,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         val inPip = MutableStateFlow(false)
+        val sharedContent = MutableStateFlow<SharedContent?>(null)
     }
 }
 
@@ -236,12 +308,13 @@ private fun AirdRoot() {
     val themeId by ThemeStore.id.collectAsState()
     val call by CallController.snapshot.collectAsState()
     val pip by MainActivity.inPip.collectAsState()
+    val backgroundOnly by CallController.backgroundOnly.collectAsState()
     val closePip by CallController.pipClose.collectAsState()
     LaunchedEffect(closePip) {
         if (closePip == 0) return@LaunchedEffect
         (context as? MainActivity)?.leaveCallPip()
     }
-    LaunchedEffect(call.phase, call.mode) {
+    LaunchedEffect(call.phase, call.mode, call.minimized) {
         val activity = context as? MainActivity ?: return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.isInPictureInPictureMode) {
             activity.updatePipParams()
@@ -258,12 +331,12 @@ private fun AirdRoot() {
     ProvideAirdMotion {
         AirdTheme(AirdPalettes.byId(themeId)) {
             val reduced = LocalAirdReducedMotion.current
-            val appear = if (reduced) EnterTransition.None else fadeIn(tween(220))
+            val appear = if (reduced || call.phase == CallPhase.Incoming) EnterTransition.None else fadeIn(tween(220))
             Box(Modifier.fillMaxSize()) {
                 if (signedIn) ChatHome() else LoginScreen(onSignedIn = {})
                 val outcome = call.phase == CallPhase.Idle && call.status.isNotEmpty()
                 val showCall = outcome || pip || (call.phase != CallPhase.Idle && !call.minimized)
-                val showBubble = call.minimized && call.mode == "video" && call.phase != CallPhase.Idle && !pip
+                val showBubble = call.minimized && call.mode == "video" && call.phase != CallPhase.Idle && !pip && !backgroundOnly
                 AnimatedVisibility(
                     visible = showCall,
                     modifier = Modifier.fillMaxSize(),

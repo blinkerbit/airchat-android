@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aird.chat.data.ChatRepository
+import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -56,12 +57,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { ChatRepository.attach(getApplication(), uris, caption, replyToId) }
     }
 
+    fun attachTo(conversationId: String, uris: List<Uri>, caption: String) {
+        viewModelScope.launch { ChatRepository.attachTo(getApplication(), conversationId, uris, caption) }
+    }
+
+    fun sendTo(conversationId: String, text: String) {
+        viewModelScope.launch { ChatRepository.sendTo(getApplication(), conversationId, text) }
+    }
+
     fun attachPaths(paths: List<String>, caption: String, replyToId: String?) {
         viewModelScope.launch { ChatRepository.attachPaths(getApplication(), paths, caption, replyToId) }
     }
 
-    fun saveCopy(message: ChatMessage, index: Int, destDir: String) {
-        viewModelScope.launch { ChatRepository.saveCopy(getApplication(), message, index, destDir) }
+    fun saveCopy(message: ChatMessage, attachment: ChatAttachment, destDir: String) {
+        viewModelScope.launch { ChatRepository.saveCopy(getApplication(), message, attachment, destDir) }
     }
 
     fun attachBytes(name: String, mime: String, bytes: ByteArray, caption: String, replyToId: String?) {
@@ -106,7 +115,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { ChatRepository.createGroup(getApplication(), title, members) }
     }
 
+    fun addMember(username: String) {
+        val id = ChatRepository.activeId.value
+        if (id.isEmpty()) return
+        viewModelScope.launch { ChatRepository.addMember(getApplication(), id, username) }
+    }
+
+    fun leaveGroup() {
+        val id = ChatRepository.activeId.value
+        if (id.isEmpty()) return
+        viewModelScope.launch { ChatRepository.leaveGroup(getApplication(), id) }
+    }
+
     fun typing() = ChatRepository.typing()
 
-    fun back() = ChatRepository.close()
+    fun back() {
+        ChatRepository.close()
+        viewModelScope.launch { ChatRepository.refresh(getApplication(), quiet = true) }
+    }
 }

@@ -1,6 +1,10 @@
 package com.aird.chat.data
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
@@ -23,7 +27,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -32,6 +39,7 @@ import okio.BufferedSink
 import okio.source
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.URLEncoder
 
 object ChatRepository {
@@ -76,6 +84,23 @@ object ChatRepository {
     private val mentionPattern = Regex("@([A-Za-z0-9_.\\-@]+)")
     private var lastTyping = 0L
     private var typingClear: kotlinx.coroutines.Job? = null
+    @Volatile private var appContext: Context? = null
+    private val flushLock = Mutex()
+    private val sendLocks = ConcurrentHashMap<String, Mutex>()
+    private val networkGate = Any()
+    @Volatile private var networkRegistered = false
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val ctx = appContext ?: return
+            scope.launch { flushOutbox(ctx) }
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
+            val ctx = appContext ?: return
+            scope.launch { flushOutbox(ctx) }
+        }
+    }
 
     fun requestOpen(conversationId: String) {
         _pendingOpen.value = conversationId
@@ -88,14 +113,18 @@ object ChatRepository {
     suspend fun prepare(context: Context) {
         val me = Session.username.value
         if (me.isEmpty()) return
+        rememberApp(context)
+        watchNetwork(context)
         try {
             ChatE2E.prepare(context, me)
         } catch (err: Exception) {
             _error.value = err.message ?: "Encryption is not ready"
         }
+        flushOutbox(context)
     }
 
     suspend fun refresh(context: Context, quiet: Boolean = false) {
+        rememberApp(context)
         val response = try {
             AirdHttp.get(context, "/api/chat/conversations")
         } catch (err: Exception) {
@@ -127,6 +156,7 @@ object ChatRepository {
         }
         _presence.value = _presence.value + presenceMap
         _error.value = ""
+        publishUnreadBadge()
     }
 
     suspend fun searchUsers(context: Context, query: String): List<String> {
@@ -172,12 +202,66 @@ object ChatRepository {
         return true
     }
 
+    suspend fun addMember(context: Context, conversationId: String, username: String): Boolean {
+        val name = username.trim()
+        if (conversationId.isEmpty() || name.isEmpty()) return false
+        val response = try {
+            AirdHttp.send(
+                context,
+                "/api/chat/conversations/$conversationId/members",
+                "POST",
+                JSONObject().put("username", name),
+            )
+        } catch (err: Exception) {
+            _error.value = err.message ?: "Could not add member"
+            return false
+        }
+        if (!response.ok) {
+            _error.value = response.json().optString("error", "Could not add member")
+            return false
+        }
+        ChatE2E.clearKey(conversationId)
+        val sealed = try {
+            ChatE2E.encrypt(context, conversationId, "")
+        } catch (_: Exception) {
+            null
+        }
+        refresh(context, quiet = true)
+        if (sealed == null) _error.value = "Could not update encryption for the new member"
+        return true
+    }
+
+    suspend fun leaveGroup(context: Context, conversationId: String): Boolean {
+        val me = Session.username.value
+        if (conversationId.isEmpty() || me.isEmpty()) return false
+        val response = try {
+            AirdHttp.send(
+                context,
+                "/api/chat/conversations/$conversationId/members?username=${URLEncoder.encode(me, "UTF-8")}",
+                "DELETE",
+                JSONObject(),
+            )
+        } catch (err: Exception) {
+            _error.value = err.message ?: "Could not leave the group"
+            return false
+        }
+        if (!response.ok) {
+            _error.value = response.json().optString("error", "Could not leave the group")
+            return false
+        }
+        close()
+        refresh(context, quiet = true)
+        return true
+    }
+
     suspend fun open(context: Context, conversationId: String) {
+        rememberApp(context)
         _activeId.value = conversationId
         _error.value = ""
         _typing.value = ""
         _hasMore.value = true
         _loadingMore.value = false
+        touchConversation(context, conversationId, unread = 0)
         ChatNotifier.cancel(context, conversationId)
         val response = AirdHttp.get(context, "/api/chat/conversations/$conversationId/messages?limit=80")
         if (!response.ok) {
@@ -195,13 +279,65 @@ object ChatRepository {
                 }
             }
         }
-        _messages.value = items
+        _messages.value = items + outboxTail(context, conversationId, items)
         _receipts.value = receiptsOf(root.optJSONArray("receipts"))
         _pins.value = pinsOf(root.optJSONArray("pins"))
         if (items.any { it.e2e && !it.decryptOk }) {
             AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", conversationId).toString())
         }
         markRead(items.lastOrNull { !it.pending })
+    }
+
+    private val resyncing = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun resyncAsync(context: Context) {
+        val app = context.applicationContext
+        scope.launch { resync(app) }
+    }
+
+    /** Catch up after the socket was down. Keeps scroll position and loaded history. */
+    suspend fun resync(context: Context) {
+        if (!resyncing.compareAndSet(false, true)) return
+        try {
+            rememberApp(context)
+            refresh(context, quiet = true)
+            flushOutbox(context)
+            val convId = _activeId.value
+            if (convId.isEmpty()) return
+            val response = try {
+                AirdHttp.get(context, "/api/chat/conversations/$convId/messages?limit=80")
+            } catch (err: Exception) {
+                if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                return
+            }
+            if (!response.ok || convId != _activeId.value) return
+            val root = response.json()
+            val array = root.optJSONArray("messages") ?: return
+            val me = Session.username.value
+            val fresh = buildList {
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    add(toMessage(context, item, me))
+                }
+            }
+            if (convId != _activeId.value) return
+            updateMessages { current ->
+                val ids = fresh.map { it.id }.toSet()
+                val first = fresh.firstOrNull()
+                val older = if (first == null) emptyList() else current.filter {
+                    !it.pending && !it.id.startsWith("local-") && it.id !in ids && it.createdAt < first.createdAt
+                }
+                val sending = current.filter { row ->
+                    row.pending && fresh.none { it.mine && it.body.trim() == row.body.trim() }
+                }
+                older + fresh + sending
+            }
+            _receipts.value = receiptsOf(root.optJSONArray("receipts"))
+            _pins.value = pinsOf(root.optJSONArray("pins"))
+            if (AppForeground.resumed()) markRead(fresh.lastOrNull { !it.pending })
+        } finally {
+            resyncing.set(false)
+        }
     }
 
     suspend fun loadMore(context: Context): Int {
@@ -278,20 +414,24 @@ object ChatRepository {
     }
 
     suspend fun retry(context: Context, message: ChatMessage): Boolean {
-        if (!message.failed) return false
-        updateMessages { current ->
-            current.map { item ->
-                if (item.id == message.id) item.copy(pending = true, failed = false) else item
+        if (!message.failed || message.id.isEmpty()) return false
+        return withLocalSend(message.id) {
+            val row = _messages.value.firstOrNull { it.id == message.id }
+            if (row == null || !row.failed) return@withLocalSend false
+            updateMessages { current ->
+                current.map { item ->
+                    if (item.id == message.id) item.copy(pending = true, failed = false) else item
+                }
             }
+            deliverText(
+                context,
+                row.conversationId,
+                row.body,
+                row.replyToId.ifBlank { null },
+                optimistic = false,
+                existingLocalId = row.id,
+            )
         }
-        return deliverText(
-            context,
-            message.conversationId,
-            message.body,
-            message.replyToId.ifBlank { null },
-            optimistic = false,
-            existingLocalId = message.id,
-        )
     }
 
     suspend fun respond(context: Context, conversationId: String, action: String): Boolean {
@@ -316,6 +456,8 @@ object ChatRepository {
     }
 
     fun clear() {
+        unwatchNetwork()
+        appContext?.let { OutboxStore.clear(it) }
         _conversations.value = emptyList()
         _messages.value = emptyList()
         _activeId.value = ""
@@ -328,6 +470,20 @@ object ChatRepository {
         _loadingMore.value = false
         _hasMore.value = true
         _pendingOpen.value = ""
+        appContext?.let { UnreadBadge.apply(it, 0) }
+        appContext = null
+    }
+
+    suspend fun attachTo(context: Context, conversationId: String, uris: List<Uri>, caption: String) {
+        if (conversationId.isEmpty() || uris.isEmpty()) return
+        val files = uris.take(10).mapNotNull { uri -> readUri(context, uri) }
+        if (files.isEmpty()) return
+        uploadFiles(context, conversationId, files, emptyList(), caption.trim(), replyToId = null)
+    }
+
+    suspend fun sendTo(context: Context, conversationId: String, text: String) {
+        if (conversationId.isEmpty() || text.isBlank()) return
+        deliverText(context, conversationId, text.trim(), replyToId = null, optimistic = conversationId == _activeId.value)
     }
 
     suspend fun sendFromNotification(context: Context, conversationId: String, text: String) {
@@ -373,13 +529,19 @@ object ChatRepository {
         )
     }
 
-    suspend fun saveCopy(context: Context, message: ChatMessage, index: Int, destDir: String) {
+    suspend fun saveCopy(context: Context, message: ChatMessage, attachment: ChatAttachment, destDir: String) {
+        val conv = message.conversationId.ifBlank { _activeId.value }
+        val dest = destDir.trim().trim('/')
+        if (conv.isEmpty() || message.id.isEmpty()) {
+            _error.value = "Could not save a copy"
+            return
+        }
         val response = try {
             AirdHttp.send(
                 context,
-                "/api/chat/conversations/${message.conversationId}/messages/${message.id}/save-copy?i=$index",
+                "/api/chat/conversations/${pathEncode(conv)}/messages/${pathEncode(message.id)}/save-copy?i=${attachment.index}",
                 "POST",
-                JSONObject().put("dest_dir", destDir),
+                JSONObject().put("dest_dir", dest),
             )
         } catch (err: Exception) {
             _error.value = err.message ?: "Could not save a copy"
@@ -389,26 +551,78 @@ object ChatRepository {
             _error.value = response.json().optString("error", "Could not save a copy")
             return
         }
-        if (response.json().optBoolean("already_owner")) {
-            _error.value = "You already have this file"
+        val body = response.json()
+        if (body.optBoolean("already_owner")) {
+            val owned = body.optString("saved_rel").trim().trim('/')
+            val target = if (dest.isEmpty()) saveName(attachment.name) else "$dest/${saveName(attachment.name)}"
+            if (owned.isNotEmpty() && !owned.startsWith(".") && owned == target) {
+                _error.value = "Saved to $owned"
+                return
+            }
+            copyIntoFolder(context, attachment, dest)
             return
         }
-        _error.value = ""
+        val saved = body.optString("saved_rel")
+        _error.value = if (saved.isEmpty()) "Saved" else "Saved to $saved"
     }
 
-    suspend fun listFiles(context: Context, path: String): List<AirdEntry> {
+    private suspend fun copyIntoFolder(context: Context, attachment: ChatAttachment, dest: String) {
+        if (attachment.url.isBlank()) {
+            _error.value = "Could not save a copy"
+            return
+        }
+        val temp = File.createTempFile("aird-save-", ".bin", context.cacheDir)
+        try {
+            val type = AirdHttp.saveTo(context, attachment.url, temp)
+            if (type.contains("html", true)) {
+                _error.value = "Could not save a copy"
+                return
+            }
+            val name = saveName(attachment.name)
+            val uploaded = AirdHttp.postRaw(
+                context,
+                "/upload",
+                temp,
+                mapOf(
+                    "X-Upload-Dir" to headerEncode(dest),
+                    "X-Upload-Filename" to headerEncode(name),
+                ),
+            )
+            if (!uploaded.ok) {
+                _error.value = uploaded.body.trim().ifEmpty { "Could not save a copy" }.take(200)
+                return
+            }
+            _error.value = "Saved to " + if (dest.isEmpty()) name else "$dest/$name"
+        } catch (err: Exception) {
+            _error.value = err.message ?: "Could not save a copy"
+        } finally {
+            temp.delete()
+        }
+    }
+
+    private fun saveName(raw: String): String {
+        val base = raw.substringAfterLast('/').substringAfterLast('\\').trim()
+        return base.ifEmpty { "file" }.take(255)
+    }
+
+    private fun pathEncode(value: String): String = headerEncode(value)
+
+    private fun headerEncode(value: String): String =
+        URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+
+    suspend fun listFiles(context: Context, path: String): List<AirdEntry>? {
         val clean = path.trim().trim('/')
         val encoded = if (clean.isEmpty()) {
             ""
         } else {
-            clean.split('/').joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+            clean.split('/').joinToString("/") { headerEncode(it) }
         }
         val response = try {
             AirdHttp.get(context, "/api/files/$encoded")
         } catch (_: Exception) {
-            return emptyList()
+            return null
         }
-        if (!response.ok) return emptyList()
+        if (!response.ok) return null
         val files = response.json().optJSONArray("files") ?: return emptyList()
         return buildList {
             for (i in 0 until files.length()) {
@@ -453,6 +667,7 @@ object ChatRepository {
             return
         }
         if (message.id.startsWith("local-")) {
+            OutboxStore.remove(context, message.id)
             updateMessages { it.filterNot { item -> item.id == message.id } }
             return
         }
@@ -575,6 +790,13 @@ object ChatRepository {
                         }
                         if (AppForeground.resumed()) markRead(item)
                     }
+                    touchConversation(
+                        context,
+                        convId,
+                        preview = previewForList(item),
+                        updatedAt = item.createdAt,
+                    )
+                    bumpUnreadIfNeeded(context, convId, item.mine)
                     refresh(context, quiet = true)
                 }
             }
@@ -586,8 +808,15 @@ object ChatRepository {
                 if (looking) return
                 val sender = data.optString("sender", "Aird")
                 val title = _conversations.value.firstOrNull { it.id == convId }?.name() ?: sender
-                ChatNotifier.show(context, convId, title, sender, data.optString("preview", "New message"))
-                scope.launch { refresh(context, quiet = true) }
+                val preview = data.optString("preview", "New message")
+                ChatNotifier.show(context, convId, title, sender, preview)
+                scope.launch {
+                    if (preview.isNotBlank()) {
+                        touchConversation(context, convId, preview = preview, updatedAt = nowIso())
+                    }
+                    bumpUnreadIfNeeded(context, convId, mine = false)
+                    refresh(context, quiet = true)
+                }
             }
             "chat_message_edited" -> {
                 val message = data.optJSONObject("message") ?: return
@@ -674,19 +903,20 @@ object ChatRepository {
         if (sealed == null) {
             _error.value = "This conversation is still locked"
             AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", convId).toString())
-            if (existingLocalId != null) markFailed(existingLocalId)
+            if (existingLocalId != null) showFailed(existingLocalId)
             return false
         }
         val names = mentionsIn(body, convId)
         val localId = if (optimistic) {
             val id = "local-${System.currentTimeMillis()}"
+            val stamp = nowIso()
             updateMessages {
                 it + ChatMessage(
                     id = id,
                     conversationId = convId,
                     sender = Session.username.value,
                     body = body,
-                    createdAt = nowIso(),
+                    createdAt = stamp,
                     mine = true,
                     pending = true,
                     e2e = true,
@@ -695,6 +925,7 @@ object ChatRepository {
                     mentions = names,
                 )
             }
+            touchConversation(context, convId, preview = body, updatedAt = stamp)
             id
         } else {
             existingLocalId
@@ -705,10 +936,20 @@ object ChatRepository {
             .put("e2e", sealed)
             .put("mentions", JSONArray(names))
         if (!replyToId.isNullOrEmpty()) socket.put("reply_to_id", replyToId)
-        if (AirdSocket.send(socket.toString()) && awaitEcho(localId)) return true
+        if (AirdSocket.send(socket.toString()) && awaitEcho(localId)) {
+            dropOutbox(context, localId)
+            refresh(context, quiet = true)
+            return true
+        }
         val posted = postText(context, convId, body, replyToId, sealed, names, localId)
-        if (!posted && localId != null) markFailed(localId)
-        return posted
+        if (!posted.ok && localId != null) {
+            markFailed(context, localId, convId, body, replyToId, queue = posted.queue)
+        }
+        if (posted.ok) {
+            dropOutbox(context, localId)
+            refresh(context, quiet = true)
+        }
+        return posted.ok
     }
 
     private suspend fun awaitEcho(localId: String?): Boolean {
@@ -729,7 +970,7 @@ object ChatRepository {
         sealed: JSONObject,
         names: List<String>,
         localId: String?,
-    ): Boolean {
+    ): TextPost {
         val http = JSONObject()
             .put("type", "text")
             .put("e2e", sealed)
@@ -738,16 +979,18 @@ object ChatRepository {
         val response = try {
             AirdHttp.send(context, "/api/chat/conversations/$convId/messages", "POST", http)
         } catch (err: Exception) {
+            if (err is kotlin.coroutines.cancellation.CancellationException) throw err
             _error.value = err.message ?: "Not connected"
-            return false
+            return TextPost(ok = false, queue = true)
         }
         if (!response.ok) {
             _error.value = response.json().optString("error", "Not connected")
-            return false
+            val queue = response.code == 408 || response.code == 429 || response.code >= 500
+            return TextPost(ok = false, queue = queue)
         }
         val saved = response.json().optJSONObject("message")
-        if (saved != null && convId == _activeId.value) {
-            val item = toMessage(context, saved, Session.username.value)
+        val item = saved?.let { toMessage(context, it, Session.username.value) }
+        if (item != null && convId == _activeId.value) {
             updateMessages { current ->
                 val already = current.any { it.id == item.id }
                 val echoed = localId != null &&
@@ -756,19 +999,142 @@ object ChatRepository {
                 val without = if (localId == null) current else current.filterNot { it.id == localId }
                 if (already || echoed) without else without + item
             }
+            touchConversation(context, convId, preview = previewForList(item), updatedAt = item.createdAt)
         } else if (localId != null) {
             updateMessages { current -> current.filterNot { it.id == localId } }
+            touchConversation(context, convId, preview = body, updatedAt = nowIso())
         }
-        return true
+        return TextPost(ok = true, queue = false)
     }
 
-    private fun markFailed(localId: String) {
+    private fun showFailed(localId: String) {
         updateMessages { current ->
             current.map { item ->
                 if (item.id == localId) item.copy(pending = false, failed = true) else item
             }
         }
     }
+
+    private fun markFailed(
+        context: Context,
+        localId: String,
+        convId: String,
+        body: String,
+        replyToId: String?,
+        queue: Boolean,
+    ) {
+        showFailed(localId)
+        if (queue) {
+            OutboxStore.upsert(
+                context,
+                OutboxStore.Item(localId, convId, body, replyToId.orEmpty()),
+            )
+        } else {
+            OutboxStore.remove(context, localId)
+        }
+    }
+
+    private fun dropOutbox(context: Context, localId: String?) {
+        if (localId.isNullOrEmpty()) return
+        OutboxStore.remove(context, localId)
+    }
+
+    private suspend fun flushOutbox(context: Context) {
+        if (!flushLock.tryLock()) return
+        try {
+            val app = context.applicationContext
+            val items = OutboxStore.load(app)
+            for (item in items) {
+                withLocalSend(item.localId) {
+                    if (!OutboxStore.contains(app, item.localId)) return@withLocalSend
+                    stageSending(item)
+                    deliverText(
+                        app,
+                        item.conversationId,
+                        item.body,
+                        item.replyToId.ifBlank { null },
+                        optimistic = false,
+                        existingLocalId = item.localId,
+                    )
+                }
+            }
+        } finally {
+            flushLock.unlock()
+        }
+    }
+
+    private suspend fun <T> withLocalSend(localId: String, block: suspend () -> T): T {
+        val mutex = sendLocks.getOrPut(localId) { Mutex() }
+        return mutex.withLock { block() }
+    }
+
+    private fun stageSending(item: OutboxStore.Item) {
+        if (_activeId.value != item.conversationId) return
+        updateMessages { current ->
+            val existing = current.any { it.id == item.localId }
+            val next = current.map { row ->
+                if (row.id == item.localId) {
+                    row.copy(pending = true, failed = false, body = item.body, replyToId = item.replyToId)
+                } else {
+                    row
+                }
+            }
+            if (existing) next else next + outboxMessage(item, pending = true)
+        }
+    }
+
+    private fun outboxTail(context: Context, conversationId: String, items: List<ChatMessage>): List<ChatMessage> {
+        val ids = items.map { it.id }.toSet()
+        return OutboxStore.load(context)
+            .filter { it.conversationId == conversationId && it.localId !in ids }
+            .map { outboxMessage(it, pending = false) }
+    }
+
+    private fun outboxMessage(item: OutboxStore.Item, pending: Boolean): ChatMessage = ChatMessage(
+        id = item.localId,
+        conversationId = item.conversationId,
+        sender = Session.username.value,
+        body = item.body,
+        createdAt = nowIso(),
+        mine = true,
+        pending = pending,
+        failed = !pending,
+        e2e = true,
+        decryptOk = true,
+        replyToId = item.replyToId,
+    )
+
+    private fun watchNetwork(context: Context) {
+        val app = context.applicationContext
+        synchronized(networkGate) {
+            if (networkRegistered) return
+            val cm = app.getSystemService(ConnectivityManager::class.java) ?: return
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                .build()
+            try {
+                cm.registerNetworkCallback(request, networkCallback)
+                networkRegistered = true
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun unwatchNetwork() {
+        val app = appContext ?: return
+        synchronized(networkGate) {
+            if (!networkRegistered) return
+            val cm = app.getSystemService(ConnectivityManager::class.java) ?: return
+            try {
+                cm.unregisterNetworkCallback(networkCallback)
+            } catch (_: Exception) {
+            }
+            networkRegistered = false
+        }
+    }
+
+    private data class TextPost(val ok: Boolean, val queue: Boolean)
 
     private suspend fun uploadFiles(
         context: Context,
@@ -805,9 +1171,12 @@ object ChatRepository {
                 return
             }
             val saved = response.json().optJSONObject("message")
-            if (saved != null && convId == _activeId.value) {
+            if (saved != null) {
                 val item = toMessage(context, saved, Session.username.value)
-                updateMessages { current -> if (current.any { it.id == item.id }) current else current + item }
+                if (convId == _activeId.value) {
+                    updateMessages { current -> if (current.any { it.id == item.id }) current else current + item }
+                }
+                touchConversation(context, convId, preview = previewForList(item), updatedAt = item.createdAt)
             }
             refresh(context, quiet = true)
         } finally {
@@ -829,11 +1198,86 @@ object ChatRepository {
         )
     }
 
+    private fun rememberApp(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    private fun previewForList(message: ChatMessage): String = message.previewLabel()
+
+    fun totalUnread(): Int = _conversations.value.sumOf { it.unread }
+
+    private fun publishUnreadBadge() {
+        val ctx = appContext ?: return
+        UnreadBadge.apply(ctx, totalUnread())
+    }
+
+    private fun sortConversations(items: List<Conversation>): List<Conversation> =
+        items.sortedByDescending { it.updatedAt }
+
+    private fun touchConversation(
+        context: Context,
+        id: String,
+        preview: String? = null,
+        updatedAt: String? = null,
+        unread: Int? = null,
+        unreadDelta: Int? = null,
+    ) {
+        rememberApp(context)
+        val current = _conversations.value
+        val index = current.indexOfFirst { it.id == id }
+        if (index < 0) return
+        val item = current[index]
+        val nextUnread = when {
+            unread != null -> unread.coerceAtLeast(0)
+            unreadDelta != null -> (item.unread + unreadDelta).coerceAtLeast(0)
+            else -> item.unread
+        }
+        val updated = item.copy(
+            preview = preview?.takeIf { it.isNotBlank() } ?: item.preview,
+            updatedAt = updatedAt?.takeIf { it.isNotBlank() } ?: item.updatedAt,
+            unread = nextUnread,
+        )
+        val list = current.toMutableList()
+        list[index] = updated
+        _conversations.value = sortConversations(list)
+        publishUnreadBadge()
+    }
+
+    private fun bumpUnreadIfNeeded(context: Context, convId: String, mine: Boolean) {
+        if (mine || convId == _activeId.value) return
+        touchConversation(context, convId, unreadDelta = 1)
+    }
+
+    private suspend fun lastE2ePreview(context: Context, convId: String, item: JSONObject): String? {
+        val raw = item.opt("last_e2e")
+        val payload = when (raw) {
+            is JSONObject -> raw
+            is String -> if (raw.isNotBlank()) {
+                try {
+                    JSONObject(raw)
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+            else -> null
+        }
+        return if (payload != null) ChatE2E.decrypt(context, convId, payload) else null
+    }
+
     private suspend fun toConversation(context: Context, item: JSONObject): Conversation {
         val id = item.optString("id")
         var preview = plain(item.optString("last_preview"))
-        val sealed = item.optJSONObject("last_e2e")
-        if (sealed != null) preview = ChatE2E.decrypt(context, id, sealed) ?: "Encrypted message"
+        val decrypted = lastE2ePreview(context, id, item)
+        if (decrypted != null) {
+            preview = decrypted
+        } else if (preview.equals("Encrypted message", true)) {
+            val lastType = item.optString("last_type")
+            if (lastType.isNotEmpty() && lastType != "text") {
+                preview = "Shared a file"
+            }
+        }
         val members = buildList {
             val array = item.optJSONArray("members") ?: JSONArray()
             for (i in 0 until array.length()) {
@@ -924,6 +1368,8 @@ object ChatRepository {
             url = url,
             mediaKind = entry.optString("media_kind").ifEmpty { "file" },
             index = index,
+            shareUrl = entry.optString("share_url"),
+            ownerRel = entry.optString("owner_rel"),
         )
     }
 
@@ -1024,8 +1470,10 @@ object ChatRepository {
 
     private suspend fun downloadBytes(context: Context, path: String): ByteArray? = try {
         withContext(Dispatchers.IO) {
-            val request = okhttp3.Request.Builder().url(AirdHttp.absolute(context, path)).build()
-            AirdHttp.client.newCall(request).execute().use { response ->
+            val url = AirdHttp.absolute(context, path)
+            val builder = okhttp3.Request.Builder().url(url)
+            AirdHttp.attachWebViewCookies(builder, context, url)
+            AirdHttp.client.newCall(builder.build()).execute().use { response ->
                 if (!response.isSuccessful) null else response.body.bytes()
             }
         }

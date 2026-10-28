@@ -21,6 +21,10 @@ object ChatE2E {
         keys.clear()
     }
 
+    suspend fun clearKey(convId: String) = lock.withLock {
+        keys.remove(convId)
+    }
+
     suspend fun prepare(context: Context, user: String) = lock.withLock {
         val gen = generation
         username = user

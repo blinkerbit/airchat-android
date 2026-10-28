@@ -1,5 +1,6 @@
 package com.aird.call
 
+import android.app.ActivityOptions
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -10,15 +11,15 @@ import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import androidx.core.app.Person
 import com.aird.AirdConnectionService
 import com.aird.AppForeground
-import com.aird.IncomingCallReceiver
 import com.aird.MainActivity
+import com.aird.R
 import com.aird.session.AirdHttp
 import com.aird.session.AirdSocket
 import com.aird.session.Session
 import io.livekit.android.LiveKit
+import io.livekit.android.audio.AudioSwitchHandler
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
@@ -56,6 +57,8 @@ data class CallSnapshot(
     val cameraId: String = "",
     val playbackId: String = "",
     val microphoneId: String = "",
+    val output: String = "",
+    val routeHint: String = "",
 )
 
 data class Drag(val x: Float = 0f, val y: Float = 0f)
@@ -80,12 +83,16 @@ object CallController {
     val bubble: StateFlow<Drag> = _bubble
     private val _pipClose = MutableStateFlow(0)
     val pipClose: StateFlow<Int> = _pipClose
+    private val _backgroundOnly = MutableStateFlow(false)
+    val backgroundOnly: StateFlow<Boolean> = _backgroundOnly
 
-    private val silenced = mutableSetOf<String>()
+    private const val RING_WINDOW_MS = 47_000L
+    private val silenced = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private var room: Room? = null
     private var events: Job? = null
     private var ringer: Ringtone? = null
     private var generation = 0
+    private var routeHintGeneration = 0
     private var shareTrack: LocalVideoTrack? = null
 
     fun room(): Room? = room
@@ -125,7 +132,7 @@ object CallController {
                 if (callId.isNotEmpty() && callId in silenced) return
                 val current = _snapshot.value
                 if (current.phase != CallPhase.Idle) {
-                    if (current.conversationId != conv) shade(context, "Missed call", data.optString("from", "Aird"), conv)
+                    if (current.conversationId != conv) shade(context, missedTitle(data.optString("mode")), data.optString("from", "Aird"), conv)
                     return
                 }
                 val mode = if (data.optString("mode") == "video") "video" else "audio"
@@ -136,22 +143,34 @@ object CallController {
                     callId,
                     peerName,
                     mode,
-                    "Incoming",
+                    if (mode == "video") "Incoming video call" else "Incoming voice call",
                 )
                 ring(context)
-                showNotification(context)
-                AirdTelecom.reportIncoming(context, peerName, mode == "video")
+                val inApp = AppForeground.resumed()
+                launchIncomingCallActivity(context)
                 try {
-                    val callIntent = Intent(context, MainActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                        putExtra("action", "incoming_call")
-                        putExtra("conversation_id", conv)
-                        putExtra("call_id", callId)
-                        putExtra("call_mode", mode)
-                        putExtra("call_from", peerName)
-                    }
-                    context.startActivity(callIntent)
-                } catch (_: Exception) {}
+                    AirdTelecom.reportIncoming(context, peerName, mode == "video")
+                } catch (_: Exception) {
+                }
+                try {
+                    AirdConnectionService.showRinging(
+                        context,
+                        conversationId = conv,
+                        callId = callId,
+                        peer = peerName,
+                        mode = mode,
+                        alert = !inApp,
+                    )
+                } catch (_: Exception) {
+                }
+                watchInvite(context, conv, callId)
+            }
+            "call_mode" -> {
+                if (data.optString("from").equals(Session.username.value, true)) return
+                val current = _snapshot.value
+                if (!same(current, conv)) return
+                if (callId.isNotEmpty() && current.callId.isNotEmpty() && callId != current.callId) return
+                applyMode(context, video = data.optString("mode") == "video", enableCamera = false, notifyPeer = false)
             }
             "call_accept" -> {
                 val current = _snapshot.value
@@ -159,6 +178,7 @@ object CallController {
             }
             "call_decline" -> {
                 val current = _snapshot.value
+                if (callId.isNotEmpty() && !same(current, conv)) silenced.add(callId)
                 if (!same(current, conv)) return
                 val outgoing = current.phase == CallPhase.Outgoing
                 finish(
@@ -171,13 +191,51 @@ object CallController {
             }
             "call_end", "call_ended" -> {
                 val current = _snapshot.value
+                // Remember it so a late or replayed invite for this call never rings.
+                if (callId.isNotEmpty()) silenced.add(callId)
                 if (!same(current, conv)) return
                 when (current.phase) {
-                    CallPhase.Incoming -> finish(context, "Call ended", signal = false, shade = "Missed call", telecomCause = DisconnectCause.MISSED)
+                    CallPhase.Incoming -> finish(context, "Call ended", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
                     CallPhase.Idle -> Unit
                     else -> finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
                 }
             }
+        }
+    }
+
+    private fun dropIfDead(context: Context, conv: String, callId: String): Boolean {
+        val current = _snapshot.value
+        if (current.phase != CallPhase.Incoming || current.callId != callId) return true
+        if (callId.isNotEmpty()) silenced.add(callId)
+        finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
+        return true
+    }
+
+    /**
+     * Confirm the call is still live on the server, then stop ringing if the
+     * caller gave up before this invite reached us. Also stop after the ring
+     * window so a lost end event can never leave a call ringing.
+     */
+    private fun watchInvite(context: Context, conv: String, callId: String) {
+        scope.launch {
+            try {
+                val response = AirdHttp.get(context, "/api/chat/call-ring")
+                if (response.ok) {
+                    val ring = response.json().optJSONObject("ring")
+                    val ringId = ring?.optString("call_id").orEmpty()
+                    val live = ring != null &&
+                        ring.optString("conversation_id") == conv &&
+                        (callId.isEmpty() || ringId.isEmpty() || ringId == callId)
+                    if (!live) {
+                        dropIfDead(context, conv, callId)
+                        return@launch
+                    }
+                }
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+            }
+            delay(RING_WINDOW_MS)
+            dropIfDead(context, conv, callId)
         }
     }
 
@@ -191,7 +249,7 @@ object CallController {
             callId = callId,
             peer = from.ifEmpty { "Incoming call" },
             mode = if (mode == "video") "video" else "audio",
-            status = "Incoming",
+            status = if (mode == "video") "Incoming video call" else "Incoming voice call",
         )
     }
 
@@ -205,6 +263,8 @@ object CallController {
             status = "Calling…",
             speaker = mode == "video",
             cameraOn = mode == "video",
+            output = if (mode == "video") "speaker" else "earpiece",
+            playbackId = if (mode == "video") "speaker" else "earpiece",
         )
         AirdTelecom.reportOutgoing(context, peer, mode == "video")
         scope.launch {
@@ -228,13 +288,16 @@ object CallController {
         }
     }
 
-    fun accept(context: Context) {
+    fun accept(context: Context, withCamera: Boolean = false) {
         val current = _snapshot.value
         if (current.phase != CallPhase.Incoming) return
         if (current.callId.isNotEmpty()) silenced.add(current.callId)
         stopRing()
         dismiss(context, current.conversationId)
-        _snapshot.value = current.copy(phase = CallPhase.Joining, status = "Joining…", minimized = false)
+        val camera = withCamera && current.mode == "video"
+        _snapshot.value = current.copy(phase = CallPhase.Joining, status = "Joining…", minimized = false, cameraOn = camera)
+        AirdTelecom.reportConnected(context, current.peer, camera)
+        AirdConnectionService.showJoining(context)
         scope.launch {
             try {
                 val response = AirdHttp.send(
@@ -248,7 +311,7 @@ object CallController {
                     return@launch
                 }
                 signal("call_accept", current.conversationId, current.callId)
-                connect(context, response.json().optString("url"), response.json().optString("token"), current.mode == "video")
+                connect(context, response.json().optString("url"), response.json().optString("token"), current.mode == "video", camera)
             } catch (err: Exception) {
                 finish(context, err.message ?: "Could not join", signal = false, shade = null)
             }
@@ -286,16 +349,74 @@ object CallController {
         }
     }
 
-    fun updateSpeakerState(isSpeaker: Boolean) {
-        _snapshot.value = _snapshot.value.copy(speaker = isSpeaker)
+    fun toggleSpeaker(context: Context) {
+        val next = if (_snapshot.value.output == "speaker") "earpiece" else "speaker"
+        val choice = CallDevices.audioOutputs(context, room).firstOrNull { CallDevices.outputKey(it) == next }
+            ?: DeviceChoice(next, next.replaceFirstChar { it.uppercase() })
+        chooseOutput(context, choice)
     }
 
-    fun toggleSpeaker(context: Context) {
-        val next = !_snapshot.value.speaker
-        val choice = if (next) "speaker" else "earpiece"
-        CallDevices.selectPlayback(context, room, choice)
-        _snapshot.value = _snapshot.value.copy(speaker = next, playbackId = choice)
+    fun chooseOutput(context: Context, choice: DeviceChoice) {
+        CallDevices.selectAudioOutput(context, room, choice)
+        val key = CallDevices.outputKey(choice)
+        val gen = ++routeHintGeneration
+        _snapshot.value = _snapshot.value.copy(
+            speaker = key == "speaker",
+            output = key,
+            playbackId = choice.id,
+            routeHint = CallDevices.hint(choice),
+        )
         updateProximity(context)
+        scope.launch {
+            delay(1500)
+            if (routeHintGeneration == gen) _snapshot.value = _snapshot.value.copy(routeHint = "")
+        }
+    }
+
+    fun setCallMode(context: Context, video: Boolean) {
+        val current = _snapshot.value
+        if (current.phase == CallPhase.Idle || current.phase == CallPhase.Incoming) return
+        applyMode(context, video, enableCamera = video, notifyPeer = true)
+    }
+
+    private fun applyMode(context: Context, video: Boolean, enableCamera: Boolean, notifyPeer: Boolean) {
+        val current = _snapshot.value
+        if (current.phase == CallPhase.Idle) return
+        val mode = if (video) "video" else "audio"
+        val cameraOn = when {
+            !video -> false
+            enableCamera -> true
+            else -> current.cameraOn
+        }
+        if (current.mode == mode && current.cameraOn == cameraOn) return
+        var next = current.copy(mode = mode, cameraOn = cameraOn)
+        if (video) {
+            next = next.copy(speaker = true, output = "speaker", playbackId = "speaker")
+            CallDevices.applyOutput(context, room, "speaker")
+        }
+        if (!video) next = next.copy(sharing = false)
+        val hint = if (video) "Video call" else "Voice call"
+        val gen = ++routeHintGeneration
+        _snapshot.value = next.copy(routeHint = hint)
+        if (!video && current.sharing) stopShare(context)
+        updateProximity(context)
+        scope.launch {
+            try {
+                if (!cameraOn) _localVideo.value = null
+                room?.localParticipant?.setCameraEnabled(cameraOn)
+                if (cameraOn) {
+                    val track = room?.localParticipant?.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
+                    if (track != null) _localVideo.value = track
+                }
+            } catch (_: Exception) {
+            }
+        }
+        if (notifyPeer) signal("call_mode", current.conversationId, current.callId, mode)
+        AirdConnectionService.showInCall(context, next.peer.ifEmpty { "Aird Chat" }, video, cameraOn)
+        scope.launch {
+            delay(1500)
+            if (routeHintGeneration == gen) _snapshot.value = _snapshot.value.copy(routeHint = "")
+        }
     }
 
     fun toggleCamera() {
@@ -352,10 +473,10 @@ object CallController {
     }
 
     fun selectPlayback(context: Context, id: String) {
-        CallDevices.selectPlayback(context, room, id)
-        val speaker = id == "speaker" || CallDevices.playback(context, room).firstOrNull { it.id == id }?.label.equals("Speaker", true)
-        _snapshot.value = _snapshot.value.copy(playbackId = id, speaker = speaker)
-        updateProximity(context)
+        val choice = CallDevices.audioOutputs(context, room).firstOrNull { it.id == id }
+            ?: CallDevices.audioOutputs(context, room).firstOrNull { CallDevices.outputKey(it) == id }
+            ?: DeviceChoice(id, id)
+        chooseOutput(context, choice)
     }
 
     fun selectMicrophone(context: Context, id: String) {
@@ -424,23 +545,29 @@ object CallController {
     }
 
     fun minimize() {
+        _backgroundOnly.value = false
+        _snapshot.value = _snapshot.value.copy(minimized = true)
+    }
+
+    fun hideBackground() {
+        _backgroundOnly.value = true
         _snapshot.value = _snapshot.value.copy(minimized = true)
     }
 
     fun expand() {
+        _backgroundOnly.value = false
         _snapshot.value = _snapshot.value.copy(minimized = false)
     }
 
-    private suspend fun connect(context: Context, url: String, token: String, video: Boolean) {
+    private suspend fun connect(context: Context, url: String, token: String, video: Boolean, camera: Boolean = video) {
         if (url.isEmpty() || token.isEmpty()) {
             finish(context, "Call is not configured", signal = false, shade = null)
             return
         }
         val audio = context.getSystemService(AudioManager::class.java)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = video
         val next = LiveKit.create(context.applicationContext)
+        (next.audioSwitchHandler as? AudioSwitchHandler)?.forceHandleAudioRouting = true
         room = next
         events?.cancel()
         val gen = generation
@@ -449,9 +576,12 @@ object CallController {
         }
         next.connect(url, token)
         next.localParticipant.setMicrophoneEnabled(true)
-        if (video) next.localParticipant.setCameraEnabled(true)
-        _snapshot.value = _snapshot.value.copy(speaker = video, cameraOn = video)
-        AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video)
+        if (camera) next.localParticipant.setCameraEnabled(true)
+        val output = _snapshot.value.output.ifEmpty { if (video) "speaker" else "earpiece" }
+        val playback = _snapshot.value.playbackId.ifEmpty { output }
+        _snapshot.value = _snapshot.value.copy(speaker = output == "speaker", cameraOn = camera, output = output, playbackId = playback)
+        CallDevices.applyOutput(context, next, playback)
+        AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video, camera)
         if (next.remoteParticipants.isNotEmpty()) markConnected(context)
     }
 
@@ -461,6 +591,10 @@ object CallController {
                 val track = event.track
                 if (track is VideoTrack && event.publication.source != Track.Source.SCREEN_SHARE) _remoteVideo.value = track
                 if (track is VideoTrack && event.publication.source == Track.Source.SCREEN_SHARE) _remoteVideo.value = track
+                if (event.publication.kind == Track.Kind.AUDIO) {
+                    val playback = _snapshot.value.playbackId.ifEmpty { _snapshot.value.output }
+                    if (playback.isNotEmpty()) CallDevices.applyOutput(context, room, playback)
+                }
                 markConnected(context)
             }
             is RoomEvent.ParticipantConnected -> markConnected(context)
@@ -474,6 +608,10 @@ object CallController {
                 }
             }
             is RoomEvent.TrackPublished -> {
+                if (event.publication.kind == Track.Kind.AUDIO) {
+                    val playback = _snapshot.value.playbackId.ifEmpty { _snapshot.value.output }
+                    if (playback.isNotEmpty()) CallDevices.applyOutput(context, room, playback)
+                }
                 if (event.participant != room?.localParticipant) return
                 val track = event.publication.track as? VideoTrack ?: return
                 if (event.publication.source == Track.Source.SCREEN_SHARE) _screenVideo.value = track
@@ -527,6 +665,8 @@ object CallController {
         val current = _snapshot.value
         if (current.phase == CallPhase.Idle && current.status.isEmpty() && message.isEmpty()) return
         _pipClose.value = _pipClose.value + 1
+        _backgroundOnly.value = false
+        CallDevices.cancelRoutes()
         AirdTelecom.end(telecomCause)
         releaseProximity()
         generation += 1
@@ -575,12 +715,37 @@ object CallController {
         return current.phase != CallPhase.Idle && current.conversationId == conversationId
     }
 
-    private fun signal(type: String, conversationId: String, callId: String) {
+    private fun signal(type: String, conversationId: String, callId: String, mode: String? = null) {
         if (conversationId.isEmpty()) return
-        AirdSocket.send(JSONObject().put("type", type).put("conversation_id", conversationId).put("call_id", callId).toString())
+        val payload = JSONObject().put("type", type).put("conversation_id", conversationId).put("call_id", callId)
+        if (!mode.isNullOrEmpty()) payload.put("mode", mode)
+        AirdSocket.send(payload.toString())
+    }
+
+    private fun missedTitle(mode: String): String = if (mode == "video") "Missed video call" else "Missed voice call"
+
+    private var ringWakeLock: android.os.PowerManager.WakeLock? = null
+
+    fun launchIncomingCallActivity(context: Context) {
+        val current = _snapshot.value
+        if (current.phase != CallPhase.Incoming) return
+        acquireRingWakeLock(context)
+        try {
+            val callIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                putExtra("action", "incoming_call")
+                putExtra("conversation_id", current.conversationId)
+                putExtra("call_id", current.callId)
+                putExtra("call_mode", current.mode)
+                putExtra("call_from", current.peer)
+            }
+            context.startActivity(callIntent)
+        } catch (_: Exception) {
+        }
     }
 
     private fun ring(context: Context) {
+        acquireRingWakeLock(context)
         if (ringer?.isPlaying == true) return
         val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE) ?: return
         ringer = RingtoneManager.getRingtone(context.applicationContext, uri)?.apply {
@@ -593,67 +758,38 @@ object CallController {
         }
     }
 
+    private fun acquireRingWakeLock(context: Context) {
+        try {
+            if (ringWakeLock?.isHeld != true) {
+                val power = context.applicationContext.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                @Suppress("DEPRECATION")
+                ringWakeLock = power?.newWakeLock(
+                    android.os.PowerManager.FULL_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or android.os.PowerManager.ON_AFTER_RELEASE,
+                    "aird:IncomingCallRingWakeLock"
+                )
+                ringWakeLock?.acquire(30 * 1000L)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private fun stopRing() {
         try {
             ringer?.stop()
         } catch (_: Exception) {
         }
         ringer = null
+        releaseRingWakeLock()
     }
 
-    private fun showNotification(context: Context) {
-        val current = _snapshot.value
-        val accept = PendingIntent.getBroadcast(
-            context,
-            (current.conversationId + "accept").hashCode(),
-            Intent(context, IncomingCallReceiver::class.java).apply {
-                action = IncomingCallReceiver.ACTION_ACCEPT
-                putExtra(IncomingCallReceiver.KEY_CONVERSATION, current.conversationId)
-                putExtra(IncomingCallReceiver.KEY_CALL, current.callId)
-                putExtra(IncomingCallReceiver.KEY_MODE, current.mode)
-                putExtra(IncomingCallReceiver.KEY_FROM, current.peer)
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-        )
-        val decline = PendingIntent.getBroadcast(
-            context,
-            (current.conversationId + "decline").hashCode(),
-            Intent(context, IncomingCallReceiver::class.java).apply {
-                action = IncomingCallReceiver.ACTION_DECLINE
-                putExtra(IncomingCallReceiver.KEY_CONVERSATION, current.conversationId)
-                putExtra(IncomingCallReceiver.KEY_CALL, current.callId)
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-        )
-        val open = PendingIntent.getActivity(
-            context,
-            ("call-open:" + current.conversationId).hashCode(),
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                putExtra("action", "incoming_call")
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val title = if (current.mode == "video") "Incoming video call" else "Incoming voice call"
-        val builder = NotificationCompat.Builder(context, AirdConnectionService.CALL_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-            .setContentTitle(title)
-            .setContentText(current.peer)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setVibrate(longArrayOf(0, 500, 500, 500))
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)
-            .setFullScreenIntent(open, true)
-            .setContentIntent(open)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setStyle(NotificationCompat.CallStyle.forIncomingCall(Person.Builder().setName(current.peer).build(), decline, accept))
-        } else {
-            builder.addAction(android.R.drawable.ic_menu_call, "Accept", accept)
-            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Decline", decline)
+    private fun releaseRingWakeLock() {
+        try {
+            if (ringWakeLock?.isHeld == true) {
+                ringWakeLock?.release()
+            }
+        } catch (_: Exception) {
         }
-        context.getSystemService(NotificationManager::class.java).notify(callNotificationId(current.conversationId), builder.build())
+        ringWakeLock = null
     }
 
     private fun shade(context: Context, title: String, peer: String, conversationId: String) {
@@ -668,8 +804,8 @@ object CallController {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(context, AirdConnectionService.CALL_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+        val notification = NotificationCompat.Builder(context, AirdConnectionService.CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_call)
             .setContentTitle(title)
             .setContentText(peer.ifEmpty { "Aird" })
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -680,6 +816,7 @@ object CallController {
     }
 
     private fun dismiss(context: Context, conversationId: String) {
+        AirdConnectionService.dismissIncoming(context)
         if (conversationId.isEmpty()) return
         context.getSystemService(NotificationManager::class.java).cancel(callNotificationId(conversationId))
     }
@@ -716,7 +853,8 @@ object CallController {
 
     private fun updateProximity(context: Context) {
         val current = _snapshot.value
-        val needsProximity = current.phase == CallPhase.Live && current.mode == "audio" && !current.speaker
+        val earpiece = current.output == "earpiece" || (current.output.isEmpty() && !current.speaker)
+        val needsProximity = current.phase == CallPhase.Live && current.mode == "audio" && earpiece
         if (needsProximity) {
             if (proximityWakeLock?.isHeld != true) {
                 val power = context.applicationContext.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager

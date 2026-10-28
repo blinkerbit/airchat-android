@@ -43,28 +43,29 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.navigation.compose)
-    // implementation(libs.hilt.android)
-    // kapt(libs.hilt.compiler)
-    // implementation(libs.androidx.hilt.navigation.compose)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.coil.compose)
-    implementation(libs.core.ktx)
     implementation(libs.retrofit)
     implementation(libs.retrofit.serialization)
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+
+    val lifecycle = "2.8.7"
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:$lifecycle")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:$lifecycle")
+    implementation("androidx.lifecycle:lifecycle-process:$lifecycle")
+
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("io.livekit:livekit-android:2.18.2")
+
     val media3 = "1.8.0"
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-session:$media3")
     implementation("androidx.media3:media3-datasource-okhttp:$media3")
+
+    implementation("me.leolin:ShortcutBadger:1.1.22@aar")
 
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

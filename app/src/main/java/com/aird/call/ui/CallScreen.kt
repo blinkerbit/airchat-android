@@ -1,10 +1,13 @@
 package com.aird.call.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -36,6 +39,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.OpenInFull
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.StopScreenShare
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -54,6 +58,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -94,6 +99,12 @@ fun CallScreen() {
     val tile by CallController.tile.collectAsState()
     val inPip by MainActivity.inPip.collectAsState()
     var menu by remember { mutableStateOf("") }
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) CallController.setCallMode(context, true)
+    }
+    val answerWithVideo = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) CallController.accept(context, withCamera = true)
+    }
     val capture = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         if (result.resultCode == android.app.Activity.RESULT_OK && data != null) CallController.beginShare(context, data)
@@ -114,20 +125,41 @@ fun CallScreen() {
                     Text(call.peer.ifEmpty { "A" }.take(1).uppercase(), color = Color.White, fontSize = 42.sp, fontWeight = FontWeight.SemiBold)
                 }
                 Text(call.peer.ifEmpty { "Aird" }, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 18.dp))
-                FadingStatus(call.status, Modifier.padding(top = 6.dp), Color(0xFFB8C4CC))
+                if (call.phase == CallPhase.Incoming) IncomingKind(call.mode == "video")
+                else FadingStatus(call.status, Modifier.padding(top = 6.dp), Color(0xFFB8C4CC))
             }
         }
         if (!inPip && full != null) {
             val overlay = if (call.status.isNotEmpty() && call.status != "Connected") call.status else ""
             FadingStatus(overlay, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 56.dp), Color.White, 18.sp)
         }
-        if (inPip) {
-            FadingStatus(
-                if (call.phase == CallPhase.Idle) call.status else "",
-                Modifier.align(Alignment.Center),
-                Color.White,
-                18.sp,
-            )
+        if (inPip && full == null && call.phase != CallPhase.Idle) {
+            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.size(56.dp).clip(CircleShape).background(Color(0xFF1F2C34)), contentAlignment = Alignment.Center) {
+                    Text(call.peer.ifEmpty { "A" }.take(1).uppercase(), color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Text(call.peer.ifEmpty { "Aird" }, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+            }
+        }
+        if (inPip && call.phase != CallPhase.Idle) {
+            Row(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0x99000000)).padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PressIconButton(onClick = { (context as? MainActivity)?.hideCallToBackground() }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Hide", tint = Color.White)
+                }
+                PressIconButton(
+                    onClick = {
+                        CallController.expand()
+                        (context as? MainActivity)?.leaveCallPip()
+                    },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(Icons.Default.OpenInFull, contentDescription = "Maximize", tint = Color.White)
+                }
+            }
         }
         if (!inPip && tileFeed != null && !collapsed && call.phase != CallPhase.Idle) {
             Box(
@@ -157,36 +189,69 @@ fun CallScreen() {
                 )
             }
         }
-        if (!inPip && collapsed && tileFeed != null) {
-            Box(
-                Modifier.align(Alignment.CenterEnd).offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
-                    .size(width = 28.dp, height = 72.dp)
-                    .clip(RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp))
-                    .background(CallGlass)
-                    .clickable { CallController.restoreTile() },
-            )
-        }
         if (!inPip && call.phase != CallPhase.Idle) {
             Column(
                 Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp).fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                val reduced = LocalAirdReducedMotion.current
+                AnimatedVisibility(
+                    visible = call.routeHint.isNotEmpty(),
+                    enter = if (reduced) EnterTransition.None else fadeIn(tween(160)),
+                    exit = if (reduced) ExitTransition.None else fadeOut(tween(220)),
+                ) {
+                    Text(
+                        call.routeHint,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .padding(bottom = 10.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                    )
+                }
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (call.phase == CallPhase.Incoming) {
-                        CallButton(Color(0xFF25D366), Icons.Default.Call, "Accept") { CallController.accept(context) }
-                        CallButton(Color(0xFFE53935), Icons.Default.CallEnd, "Decline") { CallController.decline(context) }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CallButton(Color(0xFF25D366), Icons.Default.Call, "Answer") { CallController.accept(context, withCamera = false) }
+                            Text("Answer", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                        }
+                        if (call.mode == "video") {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CallButton(Color(0xFF1F6F5B), Icons.Default.Videocam, "Video") {
+                                    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                    if (granted) CallController.accept(context, withCamera = true) else answerWithVideo.launch(Manifest.permission.CAMERA)
+                                }
+                                Text("Video", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                            }
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CallButton(Color(0xFFE53935), Icons.Default.CallEnd, "Decline") { CallController.decline(context) }
+                            Text("Decline", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                        }
                     } else {
                         CallButton(CallGlass, if (call.muted) Icons.Default.MicOff else Icons.Default.Mic, "Mute", CallController::toggleMute)
                         Box {
-                            val audioChoices = remember(call.speaker) { CallDevices.audioOutputs(context, CallController.room()) }
-                            val audioIcon = if (call.speaker) Icons.AutoMirrored.Filled.VolumeUp else Icons.Default.Headphones
-                            CallButton(CallGlass, audioIcon, if (call.speaker) "Speaker" else "Earpiece") {
-                                val hasBluetooth = audioChoices.any { it.label.contains("Bluetooth", true) || it.label.contains("Wired", true) }
-                                if (hasBluetooth) {
+                            val audioChoices = remember(call.output) { CallDevices.audioOutputs(context, CallController.room()) }
+                            val audioIcon = when (call.output) {
+                                "speaker" -> Icons.AutoMirrored.Filled.VolumeUp
+                                "headset" -> Icons.Default.Headphones
+                                else -> Icons.Default.Phone
+                            }
+                            val audioName = when (call.output) {
+                                "speaker" -> "Speaker"
+                                "headset" -> "Headset"
+                                else -> "Earpiece"
+                            }
+                            CallButton(CallGlass, audioIcon, audioName) {
+                                val hasHeadset = audioChoices.any { CallDevices.outputKey(it) == "headset" }
+                                if (hasHeadset) {
                                     menu = if (menu == "audio") "" else "audio"
                                 } else {
                                     CallController.toggleSpeaker(context)
@@ -198,8 +263,7 @@ fun CallScreen() {
                                 onDismiss = { menu = "" },
                                 onSelect = { choice ->
                                     menu = ""
-                                    CallDevices.selectAudioOutput(context, CallController.room(), choice)
-                                    CallController.updateSpeakerState(choice.label.contains("Speaker", true))
+                                    CallController.chooseOutput(context, choice)
                                 },
                             )
                         }
@@ -223,11 +287,66 @@ fun CallScreen() {
                 }
             }
             if (call.phase == CallPhase.Live || call.phase == CallPhase.Outgoing || call.phase == CallPhase.Joining) {
-                IconButton(
-                    onClick = { CallController.minimize() },
-                    modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 8.dp, top = 12.dp).size(56.dp),
+                val videoCall = call.mode == "video"
+                Column(
+                    Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 12.dp),
                 ) {
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Minimize", tint = Color.White, modifier = Modifier.size(32.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CallButton(
+                                CallGlass,
+                                if (videoCall) Icons.Default.Phone else Icons.Default.Videocam,
+                                if (videoCall) "Switch to voice" else "Switch to video",
+                            ) {
+                                if (videoCall) {
+                                    CallController.setCallMode(context, false)
+                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                    CallController.setCallMode(context, true)
+                                } else {
+                                    cameraPermission.launch(Manifest.permission.CAMERA)
+                                }
+                            }
+                            Text(
+                                if (videoCall) "Voice" else "Video",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                        Column(
+                            Modifier.padding(start = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            CallButton(CallGlass, Icons.Default.KeyboardArrowDown, "Minimize") {
+                                val activity = context as? MainActivity
+                                if (activity?.enterCallPip() != true) CallController.minimize()
+                            }
+                            Text(
+                                "Minimize",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    }
+                    if (collapsed && tileFeed != null) {
+                        Column(
+                            Modifier.padding(top = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            CallButton(
+                                CallGlass,
+                                Icons.Default.Videocam,
+                                if (swapped) "Show video" else "Show your video",
+                            ) { CallController.restoreTile() }
+                            Text(
+                                if (swapped) "Video" else "You",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -341,6 +460,30 @@ private fun DeviceMenu(open: Boolean, devices: List<com.aird.call.DeviceChoice>,
         devices.forEach { device ->
             DropdownMenuItem(text = { Text(device.label) }, onClick = { onPick(device.id) })
         }
+    }
+}
+
+@Composable
+private fun IncomingKind(video: Boolean) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            if (video) "Video call" else "Voice call",
+            color = if (video) Color(0xFF1A1206) else Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier
+                .padding(top = 14.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(if (video) Color(0xFFF5C16C) else Color(0xFF1F6F5B))
+                .padding(horizontal = 18.dp, vertical = 8.dp),
+        )
+        Text(
+            if (video) "Answer keeps your camera off" else "Voice only. Your camera stays off",
+            color = if (video) Color(0xFFF5C16C) else Color(0xFFB8C4CC),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(top = 10.dp),
+        )
     }
 }
 
