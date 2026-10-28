@@ -77,7 +77,16 @@ object ChatE2E {
     private suspend fun keyFor(context: Context, convId: String): ByteArray? = lock.withLock {
         keys[convId]?.let { return@withLock it }
         val me = identity ?: return@withLock null
-        val state = AirdHttp.get(context, "/api/chat/conversations/$convId/e2e").json()
+        val response = try {
+            AirdHttp.get(context, "/api/chat/conversations/$convId/e2e")
+        } catch (err: Exception) {
+            if (err is kotlinx.coroutines.CancellationException) throw err
+            return@withLock null
+        }
+        // A failed read must never look like "no key yet". That would mint a
+        // random key nobody else can unwrap.
+        if (!response.ok) return@withLock null
+        val state = response.json()
         val wraps = state.optJSONObject("wraps") ?: JSONObject()
         val pubs = state.optJSONObject("keys") ?: JSONObject()
         val mine = wraps.optJSONObject(username)
@@ -98,6 +107,7 @@ object ChatE2E {
             }
         }
         if (raw == null && wraps.length() > 0) return@withLock null
+        val minted = raw == null
         if (raw == null) raw = ChatCrypto.randomKey()
         val next = JSONObject()
         var changed = false
@@ -126,8 +136,15 @@ object ChatE2E {
             )
             changed = true
         }
+        // A key nobody can unwrap is worse than no key.
+        if (minted && next.length() == 0) return@withLock null
         if (changed && next.length() > 0) {
-            val saved = AirdHttp.send(context, "/api/chat/conversations/$convId/e2e", "PUT", JSONObject().put("wraps", next))
+            val saved = try {
+                AirdHttp.send(context, "/api/chat/conversations/$convId/e2e", "PUT", JSONObject().put("wraps", next))
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                return@withLock null
+            }
             if (!saved.ok) return@withLock null
         }
         keys[convId] = raw

@@ -765,7 +765,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
     }
     forward?.let { message ->
         ForwardSheet(
-            conversations = model.conversations.collectAsState().value,
+            conversations = model.conversations.collectAsState().value.filter { it.request.isEmpty() },
             onDismiss = { forward = null },
             onSend = { ids ->
                 model.forward(message, ids)
