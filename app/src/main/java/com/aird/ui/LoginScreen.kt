@@ -1,9 +1,14 @@
 package com.aird.ui
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Color
+import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Column
@@ -55,6 +60,10 @@ fun LoginScreen(onSignedIn: () -> Unit) {
         BrowserLogin(
             onSignedIn = onSignedIn,
             onClose = { browsing = false },
+            onFail = { message ->
+                error = message
+                browsing = false
+            },
         )
         return
     }
@@ -103,13 +112,14 @@ fun LoginScreen(onSignedIn: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit) {
+private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit, onFail: (String) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var serverOpen by remember { mutableStateOf(false) }
     var server by remember { mutableStateOf(ServerStore.get(context)) }
     var error by remember { mutableStateOf("") }
     var page by remember { mutableStateOf(0) }
+    val loginError = remember { mutableStateOf("") }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -142,8 +152,45 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit) {
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             view?.evaluateJavascript(LOGIN_FIT, null)
+                            if (view == null || url.isNullOrEmpty()) return
+                            if (view.url != null && view.url != url) return
+                            val pageView = view
+                            val finishedUrl = url
                             scope.launch {
-                                if (Session.probe(context)) onSignedIn()
+                                val signedIn = try {
+                                    Session.probe(context)
+                                } catch (_: Exception) {
+                                    if (pageView.url == null || pageView.url == finishedUrl) {
+                                        loginError.value = "Could not sign in."
+                                    }
+                                    return@launch
+                                }
+                                val current = pageView.url
+                                if (current != null && current != finishedUrl) return@launch
+                                if (signedIn) {
+                                    loginError.value = ""
+                                    onSignedIn()
+                                } else if (!awaitingCredentials(context, finishedUrl)) {
+                                    loginError.value = "Could not sign in. Check the server address."
+                                }
+                            }
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError,
+                        ) {
+                            if (request.isForMainFrame) loginError.value = "Could not open the server."
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            errorResponse: WebResourceResponse,
+                        ) {
+                            if (request.isForMainFrame && errorResponse.statusCode >= 400) {
+                                loginError.value = "Could not open the server."
                             }
                         }
                     }
@@ -155,6 +202,19 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit) {
                     view.tag = page
                     if (page > 0) view.loadUrl(ServerStore.get(view.context))
                 }
+            },
+        )
+    }
+    if (loginError.value.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { loginError.value = "" },
+            title = { Text("Sign-in failed") },
+            text = { Text(loginError.value) },
+            confirmButton = {
+                TextButton(onClick = { onFail(loginError.value) }) { Text("Server") }
+            },
+            dismissButton = {
+                TextButton(onClick = { loginError.value = "" }) { Text("Dismiss") }
             },
         )
     }
@@ -176,6 +236,17 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit) {
             },
         )
     }
+}
+
+private fun awaitingCredentials(context: Context, url: String): Boolean {
+    val page = Uri.parse(url)
+    val path = page.path.orEmpty().lowercase()
+    val host = page.host.orEmpty()
+    if (path.contains("login") || path.contains("/if/") || path.contains("authentik") || host.contains("authentik", ignoreCase = true)) {
+        return true
+    }
+    val serverHost = Uri.parse(ServerStore.get(context)).host.orEmpty()
+    return serverHost.isNotEmpty() && !host.equals(serverHost, ignoreCase = true)
 }
 
 @Composable

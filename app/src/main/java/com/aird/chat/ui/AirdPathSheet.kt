@@ -42,10 +42,23 @@ fun AirdPathSheet(
     var entries by remember { mutableStateOf<List<AirdEntry>>(emptyList()) }
     var failed by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf(setOf<String>()) }
+    var browsing by remember { mutableStateOf(false) }
     LaunchedEffect(path) {
         val listed = ChatRepository.listFiles(context, path)
         failed = listed == null
         entries = listed.orEmpty()
+    }
+    if (browsing) {
+        AirdFilesScreen(
+            startPath = path,
+            onBack = { browsing = false },
+            onPick = if (mode == AirdPickMode.Attach) {
+                { chosen -> onConfirm(chosen) }
+            } else {
+                null
+            },
+        )
+        return
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -57,6 +70,7 @@ fun AirdPathSheet(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            TextButton(onClick = { browsing = true }) { Text("Browse") }
             if (path.isNotEmpty()) {
                 TextButton(onClick = {
                     path = path.substringBeforeLast('/', "")

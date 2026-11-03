@@ -23,6 +23,7 @@ import com.aird.session.AirdSocket
 import com.aird.session.Session
 import io.livekit.android.LiveKit
 import io.livekit.android.audio.AudioSwitchHandler
+import io.livekit.android.events.DisconnectReason
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
@@ -97,11 +98,20 @@ object CallController {
     val micNeeded: StateFlow<Boolean> = _micNeeded
     private var answerWithCamera = false
     @Volatile private var app: Context? = null
-    private val silenced = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val silenced = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
     private var room: Room? = null
     private var events: Job? = null
+    private var remoteDrop: Job? = null
     private var ringer: Ringtone? = null
     private var generation = 0
+    private var mediaUrl = ""
+    private var mediaToken = ""
+    private var mediaVideo = false
+    private var mediaCamera = false
+    private var mediaTries = 0
+    private var mediaRecovering = false
+    private const val REMOTE_GRACE_MS = 5_000L
+    private const val MEDIA_TRIES = 3
     private var routeHintGeneration = 0
     private var shareTrack: LocalVideoTrack? = null
 
@@ -155,7 +165,11 @@ object CallController {
                 if (callId.isNotEmpty() && callId in silenced) return
                 val current = _snapshot.value
                 if (current.phase != CallPhase.Idle) {
-                    if (current.conversationId != conv) shade(context, missedTitle(data.optString("mode")), data.optString("from", "Aird"), conv)
+                    if (current.conversationId == conv) return
+                    // Already on a call. Tell the other caller now instead of leaving them ringing.
+                    if (conv.isNotEmpty()) signal("call_decline", conv, callId)
+                    silence(callId)
+                    shade(context, missedTitle(data.optString("mode")), data.optString("from", "Aird"), conv)
                     return
                 }
                 val mode = if (data.optString("mode") == "video") "video" else "audio"
@@ -170,7 +184,7 @@ object CallController {
                 )
                 ring(context)
                 val inApp = AppForeground.resumed()
-                launchIncomingCallActivity(context)
+                if (!inApp) launchIncomingCallActivity(context)
                 try {
                     AirdTelecom.reportIncoming(context, peerName, mode == "video")
                 } catch (_: Exception) {
@@ -201,31 +215,34 @@ object CallController {
             }
             "call_decline" -> {
                 val current = _snapshot.value
-                if (callId.isNotEmpty() && !same(current, conv)) silenced.add(callId)
+                silence(callId)
                 if (!same(current, conv)) return
-                val outgoing = current.phase == CallPhase.Outgoing
-                finish(
-                    context,
-                    if (outgoing) "Call declined" else "Call ended",
-                    signal = false,
-                    shade = if (outgoing) "Call declined" else null,
-                    telecomCause = DisconnectCause.REJECTED,
-                )
+                when (current.phase) {
+                    CallPhase.Outgoing -> finish(context, "Call declined", signal = false, shade = "Call declined", telecomCause = DisconnectCause.REJECTED)
+                    CallPhase.Incoming -> finish(context, "", signal = false, shade = null, telecomCause = DisconnectCause.REJECTED)
+                    else -> finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REJECTED)
+                }
             }
             "call_missed" -> {
-                if (callId.isNotEmpty()) silenced.add(callId)
+                silence(callId)
                 val current = _snapshot.value
-                if (!same(current, conv)) return
-                if (callId.isNotEmpty() && current.callId.isNotEmpty() && callId != current.callId) return
-                when (current.phase) {
-                    CallPhase.Outgoing -> finish(context, "No answer", signal = false, shade = null, telecomCause = DisconnectCause.MISSED)
-                    CallPhase.Incoming -> finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
-                    else -> Unit
+                if (same(current, conv)) {
+                    if (callId.isNotEmpty() && current.callId.isNotEmpty() && callId != current.callId) return
+                    when (current.phase) {
+                        CallPhase.Outgoing -> finish(context, "No answer", signal = false, shade = null, telecomCause = DisconnectCause.MISSED)
+                        CallPhase.Incoming -> finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
+                        else -> Unit
+                    }
+                    return
+                }
+                if (current.phase == CallPhase.Idle && conv.isNotEmpty() && !seenMissed(context, callId)) {
+                    markMissed(context, callId)
+                    shade(context, missedTitle(data.optString("mode")), data.optString("from", "Aird"), conv)
                 }
             }
             "call_answered" -> {
                 // Another device of ours picked up. This one stops ringing quietly.
-                if (callId.isNotEmpty()) silenced.add(callId)
+                silence(callId)
                 val current = _snapshot.value
                 if (current.phase != CallPhase.Incoming || !same(current, conv)) return
                 if (callId.isNotEmpty() && current.callId.isNotEmpty() && callId != current.callId) return
@@ -234,10 +251,10 @@ object CallController {
             "call_end", "call_ended" -> {
                 val current = _snapshot.value
                 // Remember it so a late or replayed invite for this call never rings.
-                if (callId.isNotEmpty()) silenced.add(callId)
+                silence(callId)
                 if (!same(current, conv)) return
                 when (current.phase) {
-                    CallPhase.Incoming -> finish(context, "Call ended", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
+                    CallPhase.Incoming -> finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
                     CallPhase.Idle -> Unit
                     else -> finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
                 }
@@ -248,7 +265,7 @@ object CallController {
     private fun dropIfDead(context: Context, conv: String, callId: String): Boolean {
         val current = _snapshot.value
         if (current.phase != CallPhase.Incoming || current.callId != callId) return true
-        if (callId.isNotEmpty()) silenced.add(callId)
+        silence(callId)
         finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
         return true
     }
@@ -282,9 +299,10 @@ object CallController {
     }
 
     fun restoreIncoming(conversationId: String, callId: String, mode: String, from: String) {
-        val current = _snapshot.value
-        if (current.phase != CallPhase.Idle && current.conversationId == conversationId) return
         if (conversationId.isEmpty()) return
+        val current = _snapshot.value
+        if (current.phase == CallPhase.Incoming && current.conversationId == conversationId) return
+        if (current.phase != CallPhase.Idle) return
         _snapshot.value = CallSnapshot(
             phase = CallPhase.Incoming,
             conversationId = conversationId,
@@ -293,6 +311,31 @@ object CallController {
             mode = if (mode == "video") "video" else "audio",
             status = if (mode == "video") "Incoming video call" else "Incoming voice call",
         )
+    }
+
+    /** After the socket comes back: ring if the call is still live, else show a missed notice. */
+    fun recover(context: Context) {
+        app = context.applicationContext
+        scope.launch {
+            try {
+                val response = AirdHttp.get(context, "/api/chat/call-ring")
+                if (!response.ok) return@launch
+                val body = response.json()
+                val ring = body.optJSONObject("ring")
+                if (ring != null && ring.optString("conversation_id").isNotEmpty()) {
+                    if (!ring.has("type")) ring.put("type", "call_invite")
+                    onEvent(context, ring.toString())
+                    return@launch
+                }
+                val missed = body.optJSONObject("missed")
+                if (missed != null && missed.optString("conversation_id").isNotEmpty()) {
+                    if (!missed.has("type")) missed.put("type", "call_missed")
+                    onEvent(context, missed.toString())
+                }
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+            }
+        }
     }
 
     fun start(context: Context, conversationId: String, peer: String, mode: String) {
@@ -323,12 +366,14 @@ object CallController {
                     finish(context, response.json().optString("error", "Call failed"), signal = false, shade = null)
                     return@launch
                 }
+                if (generation != startedIn) return@launch
                 val callId = response.json().optString("call_id")
                 _snapshot.value = _snapshot.value.copy(callId = callId)
                 watchOutgoing(context, startedIn, callId)
                 connect(context, response.json().optString("url"), response.json().optString("token"), mode == "video")
             } catch (err: Exception) {
                 if (err is kotlinx.coroutines.CancellationException) throw err
+                if (generation != startedIn) return@launch
                 finish(context, err.message ?: "Call failed", signal = false, shade = null)
             }
         }
@@ -356,28 +401,52 @@ object CallController {
             launchIncomingCallActivity(context)
             return
         }
-        if (current.callId.isNotEmpty()) silenced.add(current.callId)
+        silence(current.callId)
         stopRing()
         dismiss(context, current.conversationId)
         val camera = withCamera && current.mode == "video"
+        val startedIn = generation
         _snapshot.value = current.copy(phase = CallPhase.Joining, status = "Joining…", minimized = false, cameraOn = camera)
         AirdTelecom.reportConnected(context, current.peer, camera)
         AirdConnectionService.showJoining(context)
         scope.launch {
             try {
+                val live = AirdHttp.get(context, "/api/chat/call-ring")
+                if (generation != startedIn) return@launch
+                if (live.ok) {
+                    val ring = live.json().optJSONObject("ring")
+                    val ringId = ring?.optString("call_id").orEmpty()
+                    val still = ring != null &&
+                        ring.optString("conversation_id") == current.conversationId &&
+                        (current.callId.isEmpty() || ringId.isEmpty() || ringId == current.callId)
+                    if (!still) {
+                        finish(context, "", signal = false, shade = missedTitle(current.mode), telecomCause = DisconnectCause.MISSED)
+                        return@launch
+                    }
+                }
                 val response = AirdHttp.send(
                     context,
                     "/api/chat/conversations/${current.conversationId}/call",
                     "POST",
                     JSONObject().put("mode", current.mode).put("invite", false).put("call_id", current.callId),
                 )
+                if (generation != startedIn) return@launch
                 if (!response.ok) {
-                    finish(context, "Could not join", signal = false, shade = null)
+                    val gone = response.code == 409
+                    finish(
+                        context,
+                        if (gone) "" else "Could not join",
+                        signal = false,
+                        shade = if (gone) missedTitle(current.mode) else null,
+                        telecomCause = if (gone) DisconnectCause.MISSED else DisconnectCause.ERROR,
+                    )
                     return@launch
                 }
                 signal("call_accept", current.conversationId, current.callId)
                 connect(context, response.json().optString("url"), response.json().optString("token"), current.mode == "video", camera)
             } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                if (generation != startedIn) return@launch
                 finish(context, err.message ?: "Could not join", signal = false, shade = null)
             }
         }
@@ -385,8 +454,8 @@ object CallController {
 
     fun decline(context: Context) {
         val current = _snapshot.value
-        if (current.phase != CallPhase.Incoming && current.phase != CallPhase.Joining) return
-        if (current.callId.isNotEmpty()) silenced.add(current.callId)
+        if (current.phase != CallPhase.Incoming) return
+        silence(current.callId)
         signal("call_decline", current.conversationId, current.callId)
         finish(context, "", signal = false, shade = null, telecomCause = DisconnectCause.REJECTED)
     }
@@ -629,17 +698,28 @@ object CallController {
             finish(context, "Call is not configured", signal = false, shade = null)
             return
         }
+        mediaUrl = url
+        mediaToken = token
+        mediaVideo = video
+        mediaCamera = camera
+        val gen = generation
         val audio = context.getSystemService(AudioManager::class.java)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         val next = LiveKit.create(context.applicationContext)
         (next.audioSwitchHandler as? AudioSwitchHandler)?.forceHandleAudioRouting = true
         room = next
         events?.cancel()
-        val gen = generation
         events = scope.launch {
             next.events.collect { event -> if (gen == generation) onRoomEvent(context, event) }
         }
         next.connect(url, token)
+        if (generation != gen) {
+            try {
+                next.disconnect()
+            } catch (_: Exception) {
+            }
+            return
+        }
         // A blocked microphone or camera must not fail the call. Join listen-only instead.
         var hint = ""
         val micOn = hasMicrophone(context) && try {
@@ -664,6 +744,7 @@ object CallController {
             }
             if (!cameraOn && hint.isEmpty()) hint = "Camera is off. Allow it in Settings to share video."
         }
+        if (generation != gen) return
         val output = _snapshot.value.output.ifEmpty { if (video) "speaker" else "earpiece" }
         val playback = _snapshot.value.playbackId.ifEmpty { output }
         _snapshot.value = _snapshot.value.copy(
@@ -696,15 +777,24 @@ object CallController {
                 }
                 markConnected(context)
             }
-            is RoomEvent.ParticipantConnected -> markConnected(context)
-            is RoomEvent.ParticipantDisconnected -> {
-                val active = room
-                if (active != null && active.remoteParticipants.isEmpty()) {
-                    val phase = _snapshot.value.phase
-                    if (phase == CallPhase.Live || phase == CallPhase.Joining || phase == CallPhase.Outgoing) {
-                        finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
-                    }
+            is RoomEvent.ParticipantConnected -> {
+                remoteDrop?.cancel()
+                markConnected(context)
+            }
+            is RoomEvent.ParticipantDisconnected -> watchRemoteDrop(context)
+            is RoomEvent.Reconnecting -> {
+                remoteDrop?.cancel()
+                val phase = _snapshot.value.phase
+                if (phase == CallPhase.Live || phase == CallPhase.Joining || phase == CallPhase.Outgoing) {
+                    _snapshot.value = _snapshot.value.copy(status = "Reconnecting…")
                 }
+            }
+            is RoomEvent.Reconnected -> {
+                remoteDrop?.cancel()
+                mediaTries = 0
+                mediaRecovering = false
+                reapplyMedia(context)
+                markConnected(context)
             }
             is RoomEvent.TrackPublished -> {
                 if (event.publication.kind == Track.Kind.AUDIO) {
@@ -740,8 +830,19 @@ object CallController {
                 }
             }
             is RoomEvent.Disconnected -> {
-                if (_snapshot.value.phase != CallPhase.Idle) {
-                    finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
+                if (event.reason == DisconnectReason.CLIENT_INITIATED) return
+                val phase = _snapshot.value.phase
+                if (phase == CallPhase.Idle) return
+                if (event.room !== room && room != null) return
+                when (event.reason) {
+                    DisconnectReason.ROOM_DELETED,
+                    DisconnectReason.ROOM_CLOSED,
+                    DisconnectReason.PARTICIPANT_REMOVED,
+                    DisconnectReason.DUPLICATE_IDENTITY,
+                    DisconnectReason.USER_REJECTED,
+                    DisconnectReason.SERVER_SHUTDOWN,
+                    -> finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
+                    else -> recoverMedia(context)
                 }
             }
             else -> Unit
@@ -753,11 +854,93 @@ object CallController {
         if (current.phase != CallPhase.Outgoing && current.phase != CallPhase.Joining && current.phase != CallPhase.Live) return
         stopRing()
         dismiss(context, current.conversationId)
+        mediaTries = 0
+        mediaRecovering = false
         if (current.phase != CallPhase.Live || current.status != "Connected") {
             _snapshot.value = current.copy(phase = CallPhase.Live, status = "Connected")
         }
         updateProximity(context)
         AirdTelecom.activate()
+    }
+
+    private fun watchRemoteDrop(context: Context) {
+        val phase = _snapshot.value.phase
+        if (phase != CallPhase.Live && phase != CallPhase.Joining) return
+        val active = room ?: return
+        if (active.remoteParticipants.isNotEmpty()) return
+        remoteDrop?.cancel()
+        val gen = generation
+        remoteDrop = scope.launch {
+            delay(REMOTE_GRACE_MS)
+            if (generation != gen) return@launch
+            val still = _snapshot.value.phase
+            if (still != CallPhase.Live && still != CallPhase.Joining) return@launch
+            if (room?.remoteParticipants?.isNotEmpty() == true) return@launch
+            finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
+        }
+    }
+
+    private fun recoverMedia(context: Context) {
+        val phase = _snapshot.value.phase
+        if (phase != CallPhase.Live && phase != CallPhase.Joining && phase != CallPhase.Outgoing) return
+        if (mediaRecovering) return
+        if (mediaTries >= MEDIA_TRIES || mediaUrl.isEmpty()) {
+            finish(context, "Call dropped", signal = true, shade = null)
+            return
+        }
+        mediaRecovering = true
+        mediaTries += 1
+        val gen = generation
+        val conv = _snapshot.value.conversationId
+        val callId = _snapshot.value.callId
+        val video = mediaVideo
+        val camera = mediaCamera
+        _snapshot.value = _snapshot.value.copy(status = "Reconnecting…")
+        scope.launch {
+            delay(1_000L * mediaTries)
+            if (generation != gen) return@launch
+            try {
+                var url = mediaUrl
+                var token = mediaToken
+                if (conv.isNotEmpty()) {
+                    val remint = AirdHttp.send(
+                        context,
+                        "/api/chat/conversations/$conv/call",
+                        "POST",
+                        JSONObject().put("mode", if (video) "video" else "audio").put("invite", false).put("call_id", callId),
+                    )
+                    if (generation != gen) return@launch
+                    if (remint.ok) {
+                        url = remint.json().optString("url").ifEmpty { url }
+                        token = remint.json().optString("token").ifEmpty { token }
+                    } else if (remint.code == 409) {
+                        finish(context, "Call ended", signal = false, shade = null, telecomCause = DisconnectCause.REMOTE)
+                        return@launch
+                    }
+                }
+                connect(context, url, token, video, camera)
+                mediaRecovering = false
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                mediaRecovering = false
+                if (generation == gen) recoverMedia(context)
+            }
+        }
+    }
+
+    private fun reapplyMedia(context: Context) {
+        val active = room ?: return
+        val current = _snapshot.value
+        scope.launch {
+            try {
+                if (!current.muted && hasMicrophone(context)) active.localParticipant.setMicrophoneEnabled(true)
+                if (current.cameraOn) active.localParticipant.setCameraEnabled(true)
+                val playback = current.playbackId.ifEmpty { current.output }
+                if (playback.isNotEmpty()) CallDevices.applyOutput(context, active, playback)
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+            }
+        }
     }
 
     private fun finish(context: Context, message: String, signal: Boolean, shade: String?, telecomCause: Int = DisconnectCause.LOCAL) {
@@ -766,6 +949,12 @@ object CallController {
         if (current.phase == CallPhase.Idle && current.status.isEmpty() && message.isEmpty()) return
         _micNeeded.value = false
         answerWithCamera = false
+        remoteDrop?.cancel()
+        remoteDrop = null
+        mediaRecovering = false
+        mediaTries = 0
+        mediaUrl = ""
+        mediaToken = ""
         _pipClose.value = _pipClose.value + 1
         _backgroundOnly.value = false
         CallDevices.cancelRoutes()
@@ -776,7 +965,7 @@ object CallController {
         if (signal && current.conversationId.isNotEmpty() && current.phase != CallPhase.Idle) {
             signal("call_end", current.conversationId, current.callId)
         }
-        if (current.callId.isNotEmpty()) silenced.add(current.callId)
+        silence(current.callId)
         events?.cancel()
         val active = room
         room = null
@@ -806,7 +995,7 @@ object CallController {
         }
         _snapshot.value = CallSnapshot(status = message, peer = current.peer, mode = current.mode)
         scope.launch {
-            delay(3000)
+            delay(1800)
             if (generation == gen && _snapshot.value.phase == CallPhase.Idle && _snapshot.value.status == message) {
                 _snapshot.value = CallSnapshot()
             }
@@ -859,7 +1048,7 @@ object CallController {
                 putExtra("call_mode", current.mode)
                 putExtra("call_from", current.peer)
             }
-            context.startActivity(callIntent)
+            com.aird.IncomingCallReceiver.openFromBackground(context, callIntent)
         } catch (_: Exception) {
         }
     }
@@ -938,7 +1127,37 @@ object CallController {
     private fun dismiss(context: Context, conversationId: String) {
         AirdConnectionService.dismissIncoming(context)
         if (conversationId.isEmpty()) return
-        context.getSystemService(NotificationManager::class.java).cancel(callNotificationId(conversationId))
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancel(callNotificationId(conversationId))
+        manager.cancel(("missed:$conversationId").hashCode())
+    }
+
+    private fun silence(callId: String) {
+        if (callId.isEmpty()) return
+        synchronized(silenced) {
+            silenced.add(callId)
+            val extra = silenced.size - 40
+            if (extra > 0) {
+                val drop = silenced.take(extra)
+                silenced.removeAll(drop.toSet())
+            }
+        }
+    }
+
+    private fun seenMissed(context: Context, callId: String): Boolean {
+        if (callId.isEmpty()) return false
+        val ids = context.getSharedPreferences("aird_missed_calls", Context.MODE_PRIVATE)
+            .getStringSet("ids", emptySet()) ?: emptySet()
+        return callId in ids
+    }
+
+    private fun markMissed(context: Context, callId: String) {
+        if (callId.isEmpty()) return
+        val prefs = context.getSharedPreferences("aird_missed_calls", Context.MODE_PRIVATE)
+        val ids = (prefs.getStringSet("ids", emptySet()) ?: emptySet()).toMutableList()
+        if (callId in ids) return
+        ids.add(callId)
+        prefs.edit().putStringSet("ids", ids.takeLast(20).toSet()).apply()
     }
 
     private fun callNotificationId(conversationId: String): Int = ("call:$conversationId").hashCode()

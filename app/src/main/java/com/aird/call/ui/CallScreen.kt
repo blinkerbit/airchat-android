@@ -63,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -80,6 +81,7 @@ import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.track.VideoTrack
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.PressIconButton
+import livekit.org.webrtc.Camera2Enumerator
 import livekit.org.webrtc.RendererCommon
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -517,19 +519,65 @@ private fun FadingStatus(text: String, modifier: Modifier = Modifier, color: Col
 }
 
 @Composable
-private fun VideoSurface(track: VideoTrack, modifier: Modifier) {
+private fun VideoSurface(
+    track: VideoTrack,
+    modifier: Modifier,
+    mirror: Boolean? = null,
+    fit: Boolean = false,
+) {
     val room = CallController.room()
+    val context = LocalContext.current
+    val call by CallController.snapshot.collectAsState()
+    val localVideo by CallController.localVideo.collectAsState()
+    val screenVideo by CallController.screenVideo.collectAsState()
     val bound = remember { arrayOfNulls<VideoTrack>(1) }
+
+    val shouldMirror = remember(track, mirror, call.cameraId, localVideo, screenVideo) {
+        if (mirror != null) {
+            mirror
+        } else if (track == localVideo && track != screenVideo) {
+            val cid = call.cameraId
+            if (cid.isNotEmpty()) {
+                try {
+                    val enumerator = Camera2Enumerator(context)
+                    !enumerator.isBackFacing(cid)
+                } catch (_: Exception) {
+                    true
+                }
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    val scalingType = if (fit || track == screenVideo) {
+        RendererCommon.ScalingType.SCALE_ASPECT_FIT
+    } else {
+        RendererCommon.ScalingType.SCALE_ASPECT_FILL
+    }
+
+    val surfaceModifier = if (shouldMirror) {
+        modifier.graphicsLayer { scaleX = -1f }
+    } else {
+        modifier
+    }
+
     AndroidView(
-        modifier = modifier,
-        factory = { context ->
-            TextureViewRenderer(context).apply {
+        modifier = surfaceModifier,
+        factory = { ctx ->
+            TextureViewRenderer(ctx).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                 room?.initVideoRenderer(this)
-                setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                setScalingType(scalingType)
+                setMirror(shouldMirror)
+                setEnableHardwareScaler(true)
             }
         },
         update = { view ->
+            view.setScalingType(scalingType)
+            view.setMirror(shouldMirror)
             val previous = bound[0]
             if (previous != track) {
                 previous?.removeRenderer(view)

@@ -18,8 +18,10 @@ data class AirdPalette(
 
 object AirdPalettes {
     val all = listOf(
-        AirdPalette("light", "Light", Color(0xFFFFFFFF), Color(0xFFF2F2F2), Color(0xFFE5E6E6), Color(0xFF1F2937), Color(0xFF570DF8), Color.White, Color(0xFFF000B8), Color(0xFF37CDBE), false),
-        AirdPalette("dark", "Dark", Color(0xFF1D232A), Color(0xFF191E24), Color(0xFF15191E), Color(0xFFA6ADBB), Color(0xFF661AE6), Color.White, Color(0xFFD926A9), Color(0xFF1FB2A6), true),
+        AirdPalette("midnight", "Midnight OLED", Color(0xFF000000), Color(0xFF0C0E14), Color(0xFF161922), Color(0xFFF8FAFC), Color(0xFF6366F1), Color.White, Color(0xFFEC4899), Color(0xFF10B981), true),
+        AirdPalette("dark", "Slate Dark", Color(0xFF0F141C), Color(0xFF161C26), Color(0xFF1E2634), Color(0xFFF1F5F9), Color(0xFF6366F1), Color.White, Color(0xFFEC4899), Color(0xFF38BDF8), true),
+        AirdPalette("light", "Porcelain Light", Color(0xFFF8FAFC), Color(0xFFFFFFFF), Color(0xFFF1F5F9), Color(0xFF0F172A), Color(0xFF4F46E5), Color.White, Color(0xFFDB2777), Color(0xFF0EA5E9), false),
+        AirdPalette("emerald", "Emerald Luxe", Color(0xFF0A120E), Color(0xFF101C16), Color(0xFF172820), Color(0xFFECFDF5), Color(0xFF10B981), Color(0xFF022C22), Color(0xFF14B8A6), Color(0xFF34D399), true),
         AirdPalette("nord", "Nord", Color(0xFFECEFF4), Color(0xFFE5E9F0), Color(0xFFD8DEE9), Color(0xFF2E3440), Color(0xFF5E81AC), Color(0xFFECEFF4), Color(0xFF81A1C1), Color(0xFF88C0D0), false),
         AirdPalette("dracula", "Dracula", Color(0xFF282A36), Color(0xFF21222C), Color(0xFF44475A), Color(0xFFF8F8F2), Color(0xFFFF79C6), Color(0xFF282A36), Color(0xFFBD93F9), Color(0xFF8BE9FD), true),
         AirdPalette("cyberpunk", "Cyberpunk", Color(0xFFFFEE00), Color(0xFFF8E100), Color(0xFFE5C100), Color(0xFF000000), Color(0xFFFF7598), Color(0xFF000000), Color(0xFF75D1F0), Color(0xFFC07EEC), false),

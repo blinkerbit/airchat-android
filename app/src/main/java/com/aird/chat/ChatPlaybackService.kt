@@ -5,6 +5,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -27,6 +29,14 @@ class ChatPlaybackService : MediaSessionService() {
         val player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
             .build()
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .build(),
+            true,
+        )
+        player.setHandleAudioBecomingNoisy(true)
         this.player = player
         val open = PendingIntent.getActivity(
             this,
@@ -53,23 +63,66 @@ class ChatPlaybackService : MediaSessionService() {
 }
 
 object ChatPlayback {
+    private var controller: MediaController? = null
+    private var connecting = false
+    private var pendingUrl = ""
+    private var pendingTitle = ""
+
     fun play(context: Context, url: String, title: String) {
+        val resolved = resolve(context, url)
+        if (resolved.isEmpty()) return
+        val label = title.ifBlank { "Audio" }
         val app = context.applicationContext
+        val current = controller
+        if (current != null && current.isConnected) {
+            start(current, resolved, label)
+            return
+        }
+        pendingUrl = resolved
+        pendingTitle = label
+        if (connecting) return
+        runCatching { current?.release() }
+        controller = null
+        connecting = true
         val token = SessionToken(app, ComponentName(app, ChatPlaybackService::class.java))
         val future = MediaController.Builder(app, token).buildAsync()
         future.addListener({
-            val controller = try {
+            connecting = false
+            val ready = try {
                 future.get()
             } catch (_: Exception) {
-                return@addListener
+                null
             }
-            val item = MediaItem.Builder()
-                .setUri(url)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(title).build())
-                .build()
-            controller.setMediaItem(item)
-            controller.prepare()
-            controller.play()
+            if (ready == null) return@addListener
+            controller = ready
+            val nextUrl = pendingUrl.ifEmpty { resolved }
+            val nextTitle = pendingTitle.ifEmpty { label }
+            pendingUrl = ""
+            pendingTitle = ""
+            start(ready, nextUrl, nextTitle)
         }, ContextCompat.getMainExecutor(app))
+    }
+
+    private fun start(controller: MediaController, url: String, title: String) {
+        val item = MediaItem.Builder()
+            .setUri(url)
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(title).build())
+            .build()
+        controller.setMediaItem(item)
+        controller.prepare()
+        controller.play()
+    }
+
+    private fun resolve(context: Context, url: String): String {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return ""
+        if (trimmed.startsWith("http://", true) ||
+            trimmed.startsWith("https://", true) ||
+            trimmed.startsWith("file:", true) ||
+            trimmed.startsWith("content:", true)
+        ) {
+            return trimmed
+        }
+        return AirdHttp.absolute(context, trimmed)
     }
 }

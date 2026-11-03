@@ -277,6 +277,34 @@ object ChatRepository {
         return true
     }
 
+        suspend fun deleteConversation(context: Context, conversationId: String): Boolean {
+        if (conversationId.isEmpty()) return false
+        val response = try {
+            AirdHttp.send(
+                context,
+                "/api/chat/conversations/$conversationId",
+                "DELETE",
+                JSONObject(),
+            )
+        } catch (err: Exception) {
+            _error.value = err.message ?: "Could not delete conversation"
+            return false
+        }
+        if (!response.ok) {
+            _error.value = response.json().optString("error", "Could not delete conversation")
+            return false
+        }
+        if (_activeId.value == conversationId) close()
+        _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        return true
+    }
+
+    fun clearLocalChat(conversationId: String) {
+        if (_activeId.value == conversationId) {
+            _messages.value = emptyList()
+        }
+    }
+
     suspend fun open(context: Context, conversationId: String) {
         rememberApp(context)
         _activeId.value = conversationId
@@ -529,13 +557,19 @@ object ChatRepository {
         }
     }
 
-    suspend fun attach(context: Context, uris: List<Uri>, caption: String, replyToId: String?) {
+    suspend fun attach(
+        context: Context,
+        uris: List<Uri>,
+        caption: String,
+        replyToId: String?,
+        mediaKind: String? = null,
+    ) {
         val convId = _activeId.value
         if (convId.isEmpty() || uris.isEmpty()) return
         val files = uris.take(10).mapNotNull { uri -> readUri(context, uri) }
         if (uris.size > 10) _error.value = "Up to 10 files"
         if (files.isEmpty()) return
-        uploadFiles(context, convId, files, emptyList(), caption.trim(), replyToId)
+        uploadFiles(context, convId, files, emptyList(), caption.trim(), replyToId, mediaKind)
     }
 
     suspend fun attachPaths(context: Context, paths: List<String>, caption: String, replyToId: String?) {
@@ -692,10 +726,6 @@ object ChatRepository {
     }
 
     suspend fun delete(context: Context, message: ChatMessage) {
-        if (!message.mine) {
-            _error.value = "You can only change your own messages"
-            return
-        }
         if (message.id.startsWith("local-")) {
             OutboxStore.remove(context, message.id)
             updateMessages { it.filterNot { item -> item.id == message.id } }
@@ -1232,6 +1262,7 @@ object ChatRepository {
         paths: List<String>,
         caption: String,
         replyToId: String?,
+        mediaKind: String? = null,
     ) {
         _uploading.value = true
         try {
@@ -1248,6 +1279,10 @@ object ChatRepository {
             paths.forEach { path -> multipart.addFormDataPart("source_path", path) }
             multipart.addFormDataPart("e2e", sealed.toString())
             multipart.addFormDataPart("mentions", JSONArray(names).toString())
+            val kind = mediaKind?.trim()?.lowercase().orEmpty()
+            if (kind == "voice" || files.any { it.name.startsWith("voice_", true) }) {
+                multipart.addFormDataPart("media_kind", "voice")
+            }
             if (!replyToId.isNullOrEmpty()) multipart.addFormDataPart("reply_to_id", replyToId)
             val response = try {
                 AirdHttp.upload(context, "/api/chat/conversations/$convId/attach", multipart.build())
@@ -1421,13 +1456,18 @@ object ChatRepository {
             else -> plain(item.optString("body"))
         }
         val sender = item.optString("sender_username")
+            .ifEmpty { item.optString("sender") }
+            .ifEmpty { item.optString("username") }
+            .ifEmpty { item.optString("from") }
+        val meName = me.ifEmpty { Session.username.value }
+        val isMine = item.optBoolean("mine") || (sender.isNotEmpty() && meName.isNotEmpty() && sender.equals(meName, true))
         return ChatMessage(
             id = item.optString("id"),
             conversationId = item.optString("conversation_id"),
             sender = sender,
             body = body,
             createdAt = item.optString("created_at"),
-            mine = sender.equals(me, true),
+            mine = isMine,
             e2e = e2e,
             decryptOk = sealed == null || decrypted != null,
             replyToId = cleanReplyId(item.optString("reply_to_id")),
@@ -1563,14 +1603,31 @@ object ChatRepository {
     }
 
     private fun readUri(context: Context, uri: Uri): UploadPart? {
-        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-        val name = queryName(context, uri).ifBlank { "file" }
-        val length = querySize(context, uri)
+        val scheme = uri.scheme
+        val isFile = scheme.equals("file", true)
+        val file = if (isFile) uri.path?.let { File(it) } else null
+        val mime = if (isFile && file != null) {
+            when (file.extension.lowercase()) {
+                "m4a", "mp4" -> "audio/mp4"
+                "aac" -> "audio/aac"
+                "mp3" -> "audio/mpeg"
+                "ogg" -> "audio/ogg"
+                "wav" -> "audio/wav"
+                "gif" -> "image/gif"
+                "jpg", "jpeg" -> "image/jpeg"
+                "png" -> "image/png"
+                else -> context.contentResolver.getType(uri) ?: "application/octet-stream"
+            }
+        } else {
+            context.contentResolver.getType(uri) ?: "application/octet-stream"
+        }
+        val name = if (isFile && file != null) file.name else queryName(context, uri).ifBlank { "file" }
+        val length = if (isFile && file != null) file.length() else querySize(context, uri)
         val body = object : RequestBody() {
             override fun contentType() = mime.toMediaType()
             override fun contentLength(): Long = length
             override fun writeTo(sink: BufferedSink) {
-                val input = context.contentResolver.openInputStream(uri) ?: error("Could not read the file")
+                val input = if (isFile && file != null) file.inputStream() else (context.contentResolver.openInputStream(uri) ?: error("Could not read the file"))
                 input.use { sink.writeAll(it.source()) }
             }
         }

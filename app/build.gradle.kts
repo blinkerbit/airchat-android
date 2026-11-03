@@ -66,6 +66,7 @@ dependencies {
     implementation("androidx.media3:media3-datasource-okhttp:$media3")
 
     implementation("me.leolin:ShortcutBadger:1.1.22@aar")
+    implementation("androidx.emoji2:emoji2-emojipicker:1.4.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

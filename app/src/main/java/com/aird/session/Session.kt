@@ -23,11 +23,10 @@ object Session {
         val response = try {
             AirdHttp.get(context, "/api/chat/conversations")
         } catch (_: Exception) {
-            _signedIn.value = false
             return false
         }
         if (!response.ok) {
-            _signedIn.value = false
+            if (response.code == 401 || response.code == 403) signOut(context)
             return false
         }
         val list = response.json().optJSONArray("conversations")

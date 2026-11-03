@@ -30,6 +30,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -59,7 +62,10 @@ data class SharedContent(
 
 class MainActivity : ComponentActivity() {
     private var privilegeStep = 0
-    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        getSharedPreferences("aird", MODE_PRIVATE).edit().putBoolean(KEY_NOTIFICATIONS_PROMPTED, true).apply()
+        if (!granted) notificationDenied.value = true
+    }
     private val pipActions = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -91,7 +97,12 @@ class MainActivity : ComponentActivity() {
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            !notificationRequestSent &&
+            !getSharedPreferences("aird", MODE_PRIVATE).getBoolean(KEY_NOTIFICATIONS_PROMPTED, false)
+        ) {
+            notificationRequestSent = true
             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         setContent { AirdRoot() }
@@ -299,6 +310,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         val inPip = MutableStateFlow(false)
         val sharedContent = MutableStateFlow<SharedContent?>(null)
+        val notificationDenied = MutableStateFlow(false)
+        private const val KEY_NOTIFICATIONS_PROMPTED = "notifications_prompted"
+        private var notificationRequestSent = false
     }
 }
 
@@ -309,6 +323,7 @@ private fun AirdRoot() {
     val themeId by ThemeStore.id.collectAsState()
     val call by CallController.snapshot.collectAsState()
     val pip by MainActivity.inPip.collectAsState()
+    val notificationDenied by MainActivity.notificationDenied.collectAsState()
     val backgroundOnly by CallController.backgroundOnly.collectAsState()
     val closePip by CallController.pipClose.collectAsState()
     val micNeeded by CallController.micNeeded.collectAsState()
@@ -357,6 +372,16 @@ private fun AirdRoot() {
                     enter = appear,
                     exit = ExitTransition.None,
                 ) { CallBubble() }
+            }
+            if (notificationDenied) {
+                AlertDialog(
+                    onDismissRequest = { MainActivity.notificationDenied.value = false },
+                    title = { Text("Notifications") },
+                    text = { Text("Notifications are off, so new messages and calls will not alert you. You can allow them in system settings.") },
+                    confirmButton = {
+                        TextButton(onClick = { MainActivity.notificationDenied.value = false }) { Text("OK") }
+                    },
+                )
             }
         }
     }

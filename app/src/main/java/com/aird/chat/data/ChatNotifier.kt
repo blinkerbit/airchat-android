@@ -19,6 +19,7 @@ import com.aird.AirdConnectionService
 import com.aird.MainActivity
 import com.aird.MarkAsReadReceiver
 import com.aird.NotificationReplyReceiver
+import com.aird.R
 
 object ChatNotifier {
     private data class Note(val sender: String, val text: String, val at: Long, val mine: Boolean)
@@ -89,15 +90,18 @@ object ChatNotifier {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val sound = ConversationPrefs.isSoundEnabled(app, conversationId)
+        val shouldAlert = alert && sound
         val builder = NotificationCompat.Builder(app, AirdConnectionService.CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.drawable.ic_stat_chat)
             .setStyle(style)
             .setContentIntent(content)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setPriority(if (shouldAlert) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSilent(!shouldAlert)
             // Our own reply refreshes the card without sounding again.
-            .setOnlyAlertOnce(!alert)
+            .setOnlyAlertOnce(!shouldAlert)
             .setAutoCancel(true)
             .addAction(replyAction)
             .addAction(android.R.drawable.ic_menu_view, "Mark read", readPending)
@@ -184,7 +188,8 @@ object ChatNotifier {
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        paint.color = Color.parseColor("#1F6F5B")
+        val palette = listOf(0xFF1E88E5, 0xFF43A047, 0xFFE53935, 0xFF8E24AA, 0xFFFB8C00, 0xFF00ACC1, 0xFFD81B60, 0xFF3949AB)
+        paint.color = palette[kotlin.math.abs(name.hashCode()) % palette.size].toInt()
         canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint)
         paint.color = Color.WHITE
         paint.textAlign = Paint.Align.CENTER

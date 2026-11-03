@@ -47,11 +47,18 @@ data class ChatAttachment(
 
     fun video(): Boolean = matches("video", setOf("mp4", "webm", "mkv", "mov", "3gp", "m4v"))
 
-    fun audio(): Boolean = matches("audio", setOf("mp3", "m4a", "aac", "wav", "ogg", "flac", "opus"))
+    fun audio(): Boolean = matches("audio", setOf("mp3", "m4a", "aac", "wav", "ogg", "flac", "opus", "webm"))
+
+    fun voice(): Boolean {
+        if (mediaKind.equals("voice", true)) return true
+        val stem = name.substringBeforeLast('.', name).lowercase()
+        return stem.startsWith("voice_") && audio()
+    }
 
     private fun matches(kind: String, extensions: Set<String>): Boolean {
         if (mediaKind == kind) return true
-        if (mediaKind == "image" || mediaKind == "gif") return false
+        if (mediaKind == "voice" && kind == "audio") return true
+        if (mediaKind == "image" || mediaKind == "gif" || mediaKind == "voice") return false
         if (mediaKind.isNotEmpty() && mediaKind != "file" && mediaKind != kind) return false
         val ext = name.substringAfterLast('.', "").lowercase()
         return ext in extensions
@@ -101,6 +108,7 @@ data class ChatMessage(
         val att = attachments.firstOrNull() ?: return "Message"
         val gif = att.mediaKind == "gif" || att.name.endsWith(".gif", true)
         if (gif) return att.name.ifBlank { "GIF" }
+        if (att.voice()) return "Voice message"
         if (att.visual()) return att.name.ifBlank { "Photo" }
         return att.name.ifBlank { "File" }
     }
@@ -189,6 +197,19 @@ private fun parseInstant(iso: String): Instant? {
             null
         }
     }
+}
+
+fun formatDateHeader(iso: String): String {
+    val instant = parseInstant(iso) ?: return ""
+    val zone = ZoneId.systemDefault()
+    val whenLocal = instant.atZone(zone)
+    val today = LocalDate.now(zone)
+    val day = whenLocal.toLocalDate()
+    if (day == today) return "Today"
+    if (day == today.minusDays(1)) return "Yesterday"
+    val days = java.time.temporal.ChronoUnit.DAYS.between(day, today)
+    if (days in 2..6) return whenLocal.format(DateTimeFormatter.ofPattern("EEEE"))
+    return whenLocal.format(DateTimeFormatter.ofPattern("MMMM d, yyyy"))
 }
 
 fun nowIso(): String = Instant.now().toString()

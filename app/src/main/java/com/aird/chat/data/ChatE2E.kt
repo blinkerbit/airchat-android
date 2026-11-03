@@ -151,6 +151,83 @@ object ChatE2E {
         raw
     }
 
+    fun currentUsername(): String = username
+
+    fun hasIdentity(): Boolean = identity != null
+
+    suspend fun exportBackup(context: Context? = null): String? = lock.withLock {
+        if (identity == null && context != null && username.isNotEmpty()) {
+            val response = try {
+                AirdHttp.get(context, "/api/chat/e2e/identity")
+            } catch (_: Exception) {
+                null
+            }
+            if (response?.ok == true) {
+                val root = response.json()
+                if (root.has("backup") && !root.isNull("backup")) {
+                    identity = root.optJSONObject("backup")?.let { readIdentity(it) }
+                }
+            }
+        }
+        val me = identity ?: return@withLock null
+        val owner = username.ifBlank { return@withLock null }
+        val bundle = JSONObject()
+            .put("v", 1)
+            .put("kind", "aird-chat-e2e-identity")
+            .put("username", owner)
+            .put("exported_at", java.time.Instant.now().toString())
+            .put("publicJwk", JSONObject(me.publicJson()))
+            .put("privateJwk", JSONObject(me.privateJson()))
+            .put("kid", me.kid())
+        bundle.toString(2)
+    }
+
+    suspend fun importBackup(context: Context, jsonStr: String): Result<Unit> = lock.withLock {
+        try {
+            if (jsonStr.length > 65_536) {
+                return Result.failure(IllegalArgumentException("Invalid key backup file"))
+            }
+            val bundle = JSONObject(jsonStr.trim().removePrefix("\uFEFF"))
+            if (bundle.optInt("v") != 1 || bundle.optString("kind") != "aird-chat-e2e-identity") {
+                return Result.failure(IllegalArgumentException("Invalid key backup file"))
+            }
+            val pub = bundle.optJSONObject("publicJwk")
+            val kid = bundle.optString("kid")
+            val loaded = readIdentity(bundle)
+            if (pub == null || kid.isEmpty() || loaded == null) {
+                return Result.failure(IllegalArgumentException("Backup file is missing key material"))
+            }
+            if (pub.optString("x") != loaded.x || pub.optString("y") != loaded.y) {
+                return Result.failure(IllegalArgumentException("Invalid key backup file"))
+            }
+            val owner = bundle.optString("username").trim()
+            if (owner.isEmpty()) {
+                return Result.failure(IllegalArgumentException("Backup file has no username"))
+            }
+            val me = username
+            if (me.isNotEmpty() && owner != me) {
+                return Result.failure(IllegalArgumentException("This backup belongs to $owner, not $me"))
+            }
+            val saved = AirdHttp.send(context, "/api/chat/e2e/identity", "PUT", JSONObject().put("backup", bundle))
+            if (!saved.ok) {
+                val err = saved.json().optString("error").ifBlank { "Could not import key" }
+                return Result.failure(IllegalStateException(err))
+            }
+            identity = loaded
+            username = owner
+            keys.clear()
+            generation += 1
+            AirdHttp.send(context, "/api/chat/e2e/keys", "PUT", JSONObject().put("public_jwk", JSONObject(loaded.publicJson())))
+            Result.success(Unit)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: org.json.JSONException) {
+            Result.failure(IllegalArgumentException("Invalid key backup file"))
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException(e.message ?: "Could not import key"))
+        }
+    }
+
     private fun readIdentity(backup: JSONObject): ChatCrypto.Identity? {
         val priv = backup.optJSONObject("privateJwk") ?: return null
         val x = priv.optString("x")

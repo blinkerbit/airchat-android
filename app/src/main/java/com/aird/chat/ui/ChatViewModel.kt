@@ -53,8 +53,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { ChatRepository.respond(getApplication(), id, action) }
     }
 
-    fun attach(uris: List<Uri>, caption: String, replyToId: String?) {
-        viewModelScope.launch { ChatRepository.attach(getApplication(), uris, caption, replyToId) }
+    fun attach(uris: List<Uri>, caption: String, replyToId: String?, mediaKind: String? = null) {
+        viewModelScope.launch { ChatRepository.attach(getApplication(), uris, caption, replyToId, mediaKind) }
     }
 
     fun attachTo(conversationId: String, uris: List<Uri>, caption: String) {
@@ -97,6 +97,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { ChatRepository.forward(getApplication(), message, targets) }
     }
 
+    fun forwardAll(messages: List<ChatMessage>, targets: List<String>) {
+        viewModelScope.launch {
+            for (message in messages) {
+                ChatRepository.forward(getApplication(), message, targets)
+            }
+        }
+    }
+
     fun mute(muted: Boolean) {
         val id = ChatRepository.activeId.value
         if (id.isEmpty()) return
@@ -115,10 +123,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { ChatRepository.createGroup(getApplication(), title, members) }
     }
 
-    fun addMember(username: String) {
+    fun addMember(username: String, onResult: (Boolean) -> Unit = {}) {
         val id = ChatRepository.activeId.value
-        if (id.isEmpty()) return
-        viewModelScope.launch { ChatRepository.addMember(getApplication(), id, username) }
+        if (id.isEmpty()) {
+            onResult(false)
+            return
+        }
+        viewModelScope.launch {
+            val ok = ChatRepository.addMember(getApplication(), id, username)
+            onResult(ok)
+        }
+    }
+
+    fun deleteConversation(conversationId: String, onResult: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val ok = ChatRepository.deleteConversation(getApplication(), conversationId)
+            onResult(ok)
+        }
+    }
+
+    fun clearLocalChat(conversationId: String) {
+        ChatRepository.clearLocalChat(conversationId)
     }
 
     fun leaveGroup() {

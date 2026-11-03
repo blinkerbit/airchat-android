@@ -15,6 +15,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
                     intent.getStringExtra(KEY_MODE).orEmpty(),
                     intent.getStringExtra(KEY_FROM).orEmpty(),
                 )
+                CallController.accept(context)
                 val open = Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                     putExtra("action", "accept_call")
@@ -23,8 +24,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
                     putExtra("call_mode", intent.getStringExtra(KEY_MODE).orEmpty())
                     putExtra("call_from", intent.getStringExtra(KEY_FROM).orEmpty())
                 }
-                context.startActivity(open)
-                CallController.accept(context)
+                openFromBackground(context, open)
             }
             ACTION_DECLINE -> {
                 CallController.restoreIncoming(
@@ -41,8 +41,9 @@ class IncomingCallReceiver : BroadcastReceiver() {
                 CallController.expand()
                 val open = Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra("action", "expand_call")
                 }
-                context.startActivity(open)
+                openFromBackground(context, open)
             }
         }
     }
@@ -58,5 +59,12 @@ class IncomingCallReceiver : BroadcastReceiver() {
         const val KEY_CALL = "key_call_id"
         const val KEY_MODE = "key_call_mode"
         const val KEY_FROM = "key_call_from"
+
+        fun openFromBackground(context: Context, intent: Intent) {
+            try {
+                context.startActivity(intent)
+            } catch (_: Exception) {
+            }
+        }
     }
 }

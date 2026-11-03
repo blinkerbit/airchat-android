@@ -1,7 +1,8 @@
-package com.aird.chat.ui
+﻿package com.aird.chat.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,6 +17,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -31,12 +33,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import com.aird.chat.data.ConversationPrefs
+import com.aird.chat.data.DraftStore
+import com.aird.chat.model.formatDateHeader
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -48,10 +57,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import com.aird.SharedContent
 import androidx.compose.material3.DropdownMenu
@@ -62,7 +73,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
@@ -83,6 +93,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -107,6 +118,7 @@ import com.aird.chat.data.UnreadBadge
 import com.aird.chat.model.Conversation
 import com.aird.chat.model.filterConversations
 import com.aird.chat.model.seenLabel
+import com.aird.session.AirdSocket
 import com.aird.session.Session
 import com.aird.theme.AirdPalettes
 import com.aird.theme.ThemeStore
@@ -122,6 +134,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     val conversations by model.conversations.collectAsState()
     val active by model.activeId.collectAsState()
     val error by model.error.collectAsState()
+    val linkFailed by AirdSocket.failed.collectAsState()
     val call by CallController.snapshot.collectAsState()
     val pip by MainActivity.inPip.collectAsState()
     val backgroundOnly by CallController.backgroundOnly.collectAsState()
@@ -131,6 +144,18 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     var sheet by remember { mutableStateOf(false) }
     var addMember by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
+    var searchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var chatSearchActive by remember { mutableStateOf(false) }
+    var chatSearchQuery by remember { mutableStateOf("") }
+    var groupInfo by remember { mutableStateOf(false) }
+    var confirmDeleteChat by remember { mutableStateOf(false) }
+    var files by remember { mutableStateOf(false) }
+    var filePath by remember { mutableStateOf("") }
+    var search by remember { mutableStateOf(false) }
+    var shared by remember { mutableStateOf(false) }
+    var keys by remember { mutableStateOf(false) }
+    var enhanced by remember { mutableStateOf(false) }
     val themeId by ThemeStore.id.collectAsState()
     val openChat = conversations.firstOrNull { it.id == active }
 
@@ -150,11 +175,21 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         themeMenu = false
         addMember = false
         confirmLeave = false
+        groupInfo = false
+        confirmDeleteChat = false
+        if (active.isNotEmpty()) {
+            searchActive = false
+            searchQuery = ""
+        } else {
+            chatSearchActive = false
+            chatSearchQuery = ""
+        }
     }
 
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.ime),
+        contentWindowInsets = WindowInsets.statusBars,
         topBar = {
             TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -162,10 +197,52 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                     titleContentColor = MaterialTheme.colorScheme.onSurface,
                 ),
                 title = {
-                    if (active.isEmpty()) {
+                    if (active.isEmpty() && searchActive) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text("Search conversations…") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            shape = RoundedCornerShape(24.dp),
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    searchActive = false
+                                    searchQuery = ""
+                                }) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Close search",
+                                    )
+                                }
+                            },
+                        )
+                    } else if (active.isNotEmpty() && chatSearchActive) {
+                        OutlinedTextField(
+                            value = chatSearchQuery,
+                            onValueChange = { chatSearchQuery = it },
+                            placeholder = { Text("Search messages…") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            shape = RoundedCornerShape(24.dp),
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    chatSearchActive = false
+                                    chatSearchQuery = ""
+                                }) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Close search",
+                                    )
+                                }
+                            },
+                        )
+                    } else if (active.isEmpty()) {
                         Text("Aird Chat", fontWeight = FontWeight.Bold)
                     } else {
-                        ThreadTitle(openChat, model)
+                        Box(Modifier.clickable(enabled = openChat?.kind == "group") { if (openChat?.kind == "group") groupInfo = true }) {
+                            ThreadTitle(openChat, model)
+                        }
                     }
                 },
                 navigationIcon = {
@@ -177,6 +254,9 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                 },
                 actions = {
                     if (active.isEmpty()) {
+                        IconButton(onClick = { searchActive = !searchActive; if (!searchActive) searchQuery = "" }) {
+                            Icon(Icons.Default.Search, contentDescription = "Search")
+                        }
                         IconButton(onClick = { sheet = true }) { Icon(Icons.Default.Add, contentDescription = "New chat") }
                         IconButton(onClick = { themeMenu = true }) {
                             Icon(Icons.Default.Palette, contentDescription = "Theme")
@@ -195,6 +275,42 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Menu") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(
+                                text = { Text("Files") },
+                                onClick = {
+                                    menu = false
+                                    filePath = ""
+                                    files = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Super Search") },
+                                onClick = {
+                                    menu = false
+                                    search = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Shared with me") },
+                                onClick = {
+                                    menu = false
+                                    shared = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Key backup") },
+                                onClick = {
+                                    menu = false
+                                    keys = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Enhanced secure") },
+                                onClick = {
+                                    menu = false
+                                    enhanced = true
+                                },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Sign out") },
                                 onClick = {
                                     menu = false
@@ -204,6 +320,9 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         }
                     } else {
                         CallButtons(active, openChat?.name().orEmpty())
+                        IconButton(onClick = { chatSearchActive = !chatSearchActive; if (!chatSearchActive) chatSearchQuery = "" }) {
+                            Icon(Icons.Default.Search, contentDescription = "Search messages")
+                        }
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Menu") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(
@@ -213,7 +332,29 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                     model.mute(openChat?.muted != true)
                                 },
                             )
+                            val soundEnabled = ConversationPrefs.isSoundEnabled(context, active)
+                            DropdownMenuItem(
+                                text = { Text(if (soundEnabled) "Mute sound" else "Unmute sound") },
+                                onClick = {
+                                    menu = false
+                                    ConversationPrefs.setSoundEnabled(context, active, !soundEnabled)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Clear on this device") },
+                                onClick = {
+                                    menu = false
+                                    model.clearLocalChat(active)
+                                },
+                            )
                             if (openChat?.kind == "group") {
+                                DropdownMenuItem(
+                                    text = { Text("Group info") },
+                                    onClick = {
+                                        menu = false
+                                        groupInfo = true
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Add member") },
                                     onClick = {
@@ -229,13 +370,20 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                     },
                                 )
                             }
+                            DropdownMenuItem(
+                                text = { Text("Delete conversation", color = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    menu = false
+                                    confirmDeleteChat = true
+                                },
+                            )
                         }
                     }
                 },
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             if (call.minimized && call.phase != CallPhase.Idle && !pip && (call.mode != "video" || backgroundOnly)) {
                 Row(
                     Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary).clickable { CallController.expand() }.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -250,8 +398,9 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                     Text("Return", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
                 }
             }
-            if (error.isNotEmpty()) {
-                Text(error, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            val banner = error.ifEmpty { if (linkFailed) "Can't reach server" else "" }
+            if (banner.isNotEmpty()) {
+                Text(banner, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
             val reduced = LocalAirdReducedMotion.current
             AnimatedContent(
@@ -266,7 +415,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                 },
                 label = "conversation",
             ) { showList ->
-                if (showList) ConversationList(conversations, model) else Thread(model, openChat)
+                if (showList) ConversationList(conversations, model, searchQuery) else Thread(model, openChat, chatSearchQuery)
             }
         }
     }
@@ -274,6 +423,18 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     if (sheet) NewChatSheet(model, onDismiss = { sheet = false })
     if (addMember && openChat?.kind == "group") {
         AddMemberDialog(model, onDismiss = { addMember = false })
+    }
+    openChat?.takeIf { groupInfo }?.let { conversation ->
+        GroupInfoSheet(
+            conversation = conversation,
+            model = model,
+            onDismiss = { groupInfo = false },
+            onAddMember = { addMember = true },
+            onLeave = {
+                groupInfo = false
+                confirmLeave = true
+            },
+        )
     }
     if (confirmLeave && openChat?.kind == "group") {
         AlertDialog(
@@ -289,8 +450,42 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
             dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("Cancel") } },
         )
     }
-    pendingShare?.let { shared ->
-        ShareToAirdSheet(shared = shared, model = model, onDismiss = { MainActivity.sharedContent.value = null })
+    if (confirmDeleteChat) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteChat = false },
+            title = { Text("Delete conversation") },
+            text = { Text("Delete this conversation?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    model.deleteConversation(active) { ok ->
+                        if (ok) {
+                            confirmDeleteChat = false
+                            model.back()
+                        }
+                    }
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteChat = false }) { Text("Cancel") } },
+        )
+    }
+    pendingShare?.let { sharedContent ->
+        ShareToAirdSheet(shared = sharedContent, model = model, onDismiss = { MainActivity.sharedContent.value = null })
+    }
+    if (files) AirdFilesScreen(startPath = filePath, onBack = { files = false })
+    if (search) {
+        AirdSuperSearchScreen(
+            startPath = "",
+            onBack = { search = false },
+            onOpenPath = { path ->
+                filePath = path
+                files = true
+                search = false
+            },
+        )
+    }
+    if (shared) SharedWithMeScreen(onBack = { shared = false })
+    if (keys) KeyBackupSheet(onDismiss = { keys = false })
+    if (enhanced) EnhancedSecureScreen(onBack = { enhanced = false })
     }
 }
 
@@ -322,59 +517,70 @@ private fun ThreadTitle(conversation: Conversation?, model: ChatViewModel) {
         }
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box {
-            Avatar(conversation?.name().orEmpty(), 38)
-            if (isPeerOnline) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(12.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface)
-                        .padding(1.5.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF4CAF50))
-                )
-            }
-        }
+        Avatar(conversation?.name().orEmpty(), 38, isOnline = isPeerOnline)
         Column(Modifier.padding(start = 10.dp)) {
             Text(conversation?.name() ?: "Chat", fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 subtitle,
                 fontSize = 12.sp,
                 fontWeight = if (isPeerOnline) FontWeight.Medium else FontWeight.Normal,
-                color = if (isPeerOnline) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                color = if (isPeerOnline) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1
             )
         }
     }
 }
 
-private val AvatarColors = listOf(
-    Color(0xFF1E88E5), // Blue
-    Color(0xFF43A047), // Green
-    Color(0xFFE53935), // Red
-    Color(0xFF8E24AA), // Purple
-    Color(0xFFFB8C00), // Orange
-    Color(0xFF00ACC1), // Cyan
-    Color(0xFFD81B60), // Pink
-    Color(0xFF3949AB)  // Indigo
+private val AvatarGradients = listOf(
+    listOf(Color(0xFF6366F1), Color(0xFF8B5CF6)), // Indigo -> Violet
+    listOf(Color(0xFF059669), Color(0xFF14B8A6)), // Emerald -> Teal
+    listOf(Color(0xFFD97706), Color(0xFFF43F5E)), // Amber -> Rose
+    listOf(Color(0xFF0284C7), Color(0xFF3B82F6)), // Sky -> Blue
+    listOf(Color(0xFFC026D3), Color(0xFFEC4899)), // Fuchsia -> Pink
+    listOf(Color(0xFFEA580C), Color(0xFFF59E0B)), // Orange -> Amber
+    listOf(Color(0xFF0891B2), Color(0xFF10B981)), // Cyan -> Emerald
+    listOf(Color(0xFF9333EA), Color(0xFF4F46E5)), // Purple -> Indigo
 )
 
 @Composable
-private fun Avatar(name: String, size: Int) {
-    val colorIndex = kotlin.math.abs(name.hashCode()) % AvatarColors.size
-    val bgColor = AvatarColors[colorIndex]
+private fun Avatar(name: String, size: Int, isOnline: Boolean = false) {
+    val hash = kotlin.math.abs(name.hashCode())
+    val gradientColors = AvatarGradients[hash % AvatarGradients.size]
+    val initials = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        .take(2).map { it.first().uppercase() }.joinToString("")
+        .ifEmpty { name.take(1).uppercase().ifEmpty { "?" } }
+
     Box(
-        Modifier.size(size.dp).clip(CircleShape).background(bgColor),
-        contentAlignment = Alignment.Center,
+        modifier = Modifier.size(size.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Text(
-            name.ifEmpty { "?" }.take(1).uppercase(),
-            color = Color.White,
-            fontWeight = FontWeight.Bold,
-            fontSize = (size * 0.42).sp
-        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(Brush.linearGradient(gradientColors))
+                .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = initials,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = (size * 0.38).sp,
+                letterSpacing = (-0.5).sp
+            )
+        }
+        if (isOnline) {
+            val dotSize = (size * 0.28).coerceIn(8.0, 14.0).dp
+            Box(
+                modifier = Modifier
+                    .size(dotSize)
+                    .align(Alignment.BottomEnd)
+                    .clip(CircleShape)
+                    .background(Color(0xFF10B981))
+                    .border(2.dp, MaterialTheme.colorScheme.surface, CircleShape)
+            )
+        }
     }
 }
 
@@ -401,86 +607,112 @@ private fun CallButtons(conversationId: String, peer: String) {
 }
 
 @Composable
-private fun ConversationList(items: List<Conversation>, model: ChatViewModel) {
-    var query by remember { mutableStateOf("") }
+private fun ConversationList(items: List<Conversation>, model: ChatViewModel, query: String = "") {
     val q = query.trim()
     val shown = filterConversations(items, q)
     Column(Modifier.fillMaxSize()) {
-        TextField(
-            value = query,
-            onValueChange = { query = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            placeholder = { Text("Search conversations…") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
-            trailingIcon = {
-                if (query.isNotEmpty()) {
-                    IconButton(onClick = { query = "" }) {
-                        Icon(Icons.Default.Close, contentDescription = "Clear")
-                    }
-                }
-            },
-            shape = RoundedCornerShape(24.dp),
-            singleLine = true,
-        )
         if (shown.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     if (q.isEmpty()) "No conversations yet" else "No matches",
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyLarge,
                 )
             }
             return
         }
         LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            Modifier.fillMaxSize().navigationBarsPadding(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             items(shown, key = { it.id }) { conversation ->
                 val unread = conversation.unread > 0
-                Row(
-                    Modifier.fillMaxWidth().clickable { model.open(conversation.id) }.padding(vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                val isOnline = conversation.online
+                Surface(
+                    onClick = { model.open(conversation.id) },
+                    shape = RoundedCornerShape(16.dp),
+                    color = if (unread) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f) else Color.Transparent,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Avatar(conversation.name(), 40)
-                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                conversation.name(),
-                                fontSize = 16.sp,
-                                fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                conversation.whenLabel(),
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                conversation.preview.ifEmpty { "Encrypted message" },
-                                fontSize = 14.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (unread) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Avatar(conversation.name(), 48, isOnline = isOnline)
+                        Column(Modifier.padding(start = 14.dp).weight(1f)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
                                 Text(
-                                    conversation.unread.coerceAtMost(99).toString(),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier
-                                        .padding(start = 8.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary)
-                                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                                    text = conversation.name(),
+                                    fontSize = 16.sp,
+                                    fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = conversation.whenLabel(),
+                                    fontSize = 12.sp,
+                                    fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (unread) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    if (conversation.request == "incoming") {
+                                        Text(
+                                            "Request",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                            modifier = Modifier
+                                                .padding(end = 6.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(MaterialTheme.colorScheme.primary)
+                                                .padding(horizontal = 6.dp, vertical = 1.dp),
+                                        )
+                                    }
+                                    Text(
+                                        text = conversation.preview.ifEmpty { "Encrypted message" },
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = if (unread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (unread) {
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(start = 8.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary)
+                                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = conversation.unread.coerceAtMost(99).toString(),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -506,7 +738,7 @@ private object ChatScrollStore {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Thread(model: ChatViewModel, conversation: Conversation?) {
+private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuery: String = "") {
     val messages by model.messages.collectAsState()
     val receipts by model.receipts.collectAsState()
     val pins by model.pins.collectAsState()
@@ -514,28 +746,39 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
     val me by Session.username.collectAsState()
 
     val conversationId = conversation?.id.orEmpty()
-    val savedPosition = remember(conversationId) { ChatScrollStore.get(conversationId) }
     val initialIndex = remember(conversationId) {
         val saved = ChatScrollStore.get(conversationId)
-        if (saved != null && saved.index < messages.size) {
-            saved.index
-        } else {
-            (messages.lastIndex).coerceAtLeast(0)
-        }
+        if (saved != null && saved.index < messages.size) saved.index
+        else (messages.lastIndex).coerceAtLeast(0)
     }
     val initialOffset = remember(conversationId) {
-        ChatScrollStore.get(conversationId)?.offset ?: 0
+        val saved = ChatScrollStore.get(conversationId)
+        if (saved != null && saved.index < messages.size) saved.offset else 0
     }
 
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = initialIndex,
         initialFirstVisibleItemScrollOffset = initialOffset,
     )
-    var draft by remember { mutableStateOf("") }
+    var draft by remember(conversationId) { mutableStateOf(DraftStore.get(conversationId)) }
+    LaunchedEffect(draft, conversationId) {
+        DraftStore.set(conversationId, draft)
+    }
+    var selectedIds by remember(conversationId) { mutableStateOf(setOf<String>()) }
+    val filteredMessages = remember(messages, searchQuery) {
+        if (searchQuery.isBlank()) messages
+        else messages.filter {
+            it.body.contains(searchQuery, ignoreCase = true) || it.sender.contains(searchQuery, ignoreCase = true)
+        }
+    }
     var panel by remember { mutableStateOf("") }
     var reply by remember { mutableStateOf<ChatMessage?>(null) }
     var highlightId by remember { mutableStateOf("") }
-    var forward by remember { mutableStateOf<ChatMessage?>(null) }
+    var selecting by remember(conversationId) { mutableStateOf(false) }
+    var selectNotice by remember(conversationId) { mutableStateOf("") }
+    var confirmBulkDelete by remember(conversationId) { mutableStateOf(false) }
+    var forward by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    val conversations by model.conversations.collectAsState()
     var attachChoice by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
     var saveTarget by remember { mutableStateOf<Pair<ChatMessage, ChatAttachment>?>(null) }
@@ -634,7 +877,13 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
             }
         }
     }
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .navigationBarsPadding()
+            .imePadding()
+    ) {
         if (pins.isNotEmpty()) {
             val index = pinCursor.mod(pins.size)
             val pin = pins[index]
@@ -655,6 +904,68 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        if (selectedIds.isNotEmpty() || selecting) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        "${selectedIds.size} selected",
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Row {
+                        TextButton(onClick = {
+                            val ready = messages.filter {
+                                it.id in selectedIds && !it.pending && !it.failed && !it.id.startsWith("local-")
+                            }
+                            if (ready.isEmpty()) {
+                                selectNotice = "Wait until the message is sent"
+                            } else {
+                                selectNotice = ""
+                                forward = ready
+                            }
+                        }) {
+                            Text("Forward")
+                        }
+                        TextButton(onClick = {
+                            val mine = messages.filter { it.id in selectedIds && (it.mine || it.id.startsWith("local-")) }
+                            if (mine.isEmpty()) {
+                                selectNotice = "Only messages you sent can be deleted"
+                            } else {
+                                selectNotice = ""
+                                confirmBulkDelete = true
+                            }
+                        }) {
+                            Text("Delete", color = MaterialTheme.colorScheme.error)
+                        }
+                        TextButton(onClick = {
+                            selectedIds = emptySet()
+                            selecting = false
+                            selectNotice = ""
+                        }) {
+                            Text("Cancel")
+                        }
+                    }
+                }
+                if (selectNotice.isNotEmpty()) {
+                    Text(
+                        selectNotice,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp),
+                    )
+                }
+            }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
@@ -677,7 +988,41 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                         }
                     }
                 }
-                items(messages, key = { it.id }) { message ->
+                if (searchQuery.isNotBlank() && filteredMessages.isEmpty()) {
+                    item(key = "empty_search_result") {
+                        Box(
+                            Modifier.fillMaxWidth().padding(top = 40.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "No messages match \"$searchQuery\"",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                fontSize = 14.sp,
+                            )
+                        }
+                    }
+                }
+                itemsIndexed(filteredMessages, key = { _, it -> it.id }) { index, message ->
+                    val header = formatDateHeader(message.createdAt)
+                    val showDateHeader = header.isNotEmpty() && (index == 0 ||
+                        formatDateHeader(filteredMessages[index - 1].createdAt) != header)
+                    if (showDateHeader) {
+                        Box(
+                            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                formatDateHeader(message.createdAt),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     val quoteMsg = messages.firstOrNull { it.id == message.replyTargetId() }
                     val quoteText = quoteMsg?.body.orEmpty()
                     MessageRow(
@@ -690,7 +1035,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                         highlighted = message.id == highlightId,
                         onQuoteClick = { focusMessage(it) },
                         onReply = { reply = message },
-                        onForward = { forward = message },
+                        onForward = { forward = listOf(message) },
                         onEdit = { model.edit(message, it) },
                         onDelete = { model.delete(message) },
                         onReact = {
@@ -702,6 +1047,19 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                         onRetry = { model.retry(message) },
                         pinned = pins.any { it.messageId == message.id },
                         enter = message.id in entering,
+                        selected = message.id in selectedIds,
+                        onSelect = if (selecting || selectedIds.isNotEmpty()) {
+                            {
+                                val next = if (message.id in selectedIds) selectedIds - message.id else selectedIds + message.id
+                                selectedIds = next
+                                selecting = next.isNotEmpty()
+                            }
+                        } else null,
+                        onStartSelect = {
+                            selecting = true
+                            selectNotice = ""
+                            selectedIds = selectedIds + message.id
+                        },
                     )
                 }
             }
@@ -721,9 +1079,15 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
             }
         }
         when (conversation?.request) {
-            "incoming" -> Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { model.respond("decline") }) { Text("Decline") }
-                TextButton(onClick = { model.respond("accept") }) { Text("Accept") }
+            "incoming" -> Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                Text(
+                    "This chat stays locked until you accept.",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { model.respond("decline") }) { Text("Decline") }
+                    TextButton(onClick = { model.respond("accept") }) { Text("Accept") }
+                }
             }
             "outgoing" -> Text(
                 "Waiting for acceptance",
@@ -741,35 +1105,71 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?) {
                 reply = reply?.let { "Reply to ${it.sender}: ${it.previewLabel()}" }.orEmpty(),
                 onClearReply = { reply = null },
                 uploading = uploading,
-                onAttach = { attachChoice = true },
+                onAttach = {
+                    panel = ""
+                    attachChoice = true
+                },
                 onSend = {
                     val text = draft.trim()
                     if (text.isEmpty()) return@Composer
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     val replyId = reply?.id
                     draft = ""
+                    DraftStore.set(conversationId, "")
                     panel = ""
                     reply = null
                     model.send(text, replyId) { ok ->
-                        if (!ok && draft.isEmpty()) draft = text
+                        if (!ok && draft.isEmpty()) {
+                            draft = text
+                            DraftStore.set(conversationId, text)
+                        }
                     }
                 },
-                onContent = { uri, _ ->
+                onContent = { uri: Uri, _, voice ->
                     val caption = draft.trim()
+                    val replyId = reply?.id
                     draft = ""
-                    model.attach(listOf(uri), caption, reply?.id)
                     reply = null
+                    panel = ""
+                    model.attach(listOf(uri), caption, replyId, if (voice) "voice" else null)
                 },
             )
         }
     }
-    forward?.let { message ->
+    if (forward.isNotEmpty()) {
         ForwardSheet(
-            conversations = model.conversations.collectAsState().value.filter { it.request.isEmpty() },
-            onDismiss = { forward = null },
+            conversations = conversations.filter { it.request.isEmpty() },
+            onDismiss = { forward = emptyList() },
             onSend = { ids ->
-                model.forward(message, ids)
-                forward = null
+                val batch = forward
+                forward = emptyList()
+                selectedIds = emptySet()
+                selecting = false
+                model.forwardAll(batch, ids)
+            },
+        )
+    }
+    if (confirmBulkDelete) {
+        val mine = messages.filter { it.id in selectedIds && (it.mine || it.id.startsWith("local-")) }
+        AlertDialog(
+            onDismissRequest = { confirmBulkDelete = false },
+            title = { Text(if (mine.size == 1) "Delete message" else "Delete ${mine.size} messages") },
+            text = {
+                Text(
+                    if (mine.size == selectedIds.size) "Delete the selected messages?"
+                    else "Only messages you sent will be deleted.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmBulkDelete = false
+                    mine.forEach { model.delete(it) }
+                    selectedIds = emptySet()
+                    selecting = false
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBulkDelete = false }) { Text("Cancel") }
             },
         )
     }
@@ -828,6 +1228,8 @@ private fun pinLabel(pin: ChatPin, messages: List<ChatMessage>): String {
 private fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var chosen by remember { mutableStateOf("") }
+    var errorMsg by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
     val people by model.people.collectAsState()
     LaunchedEffect(query) {
         delay(200)
@@ -844,11 +1246,20 @@ private fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
                     onValueChange = {
                         query = it
                         chosen = ""
+                        errorMsg = ""
                     },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = { Text("Username") },
                     singleLine = true,
                 )
+                if (errorMsg.isNotEmpty()) {
+                    Text(
+                        errorMsg,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -864,6 +1275,7 @@ private fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
                                 .clickable {
                                     chosen = username
                                     query = username
+                                    errorMsg = ""
                                 }
                                 .padding(vertical = 8.dp),
                         )
@@ -874,14 +1286,81 @@ private fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (name.isNotEmpty()) model.addMember(name)
-                    onDismiss()
+                    if (name.isNotEmpty() && !loading) {
+                        loading = true
+                        errorMsg = ""
+                        model.addMember(name) { ok ->
+                            loading = false
+                            if (ok) onDismiss()
+                            else errorMsg = "Could not add user $name"
+                        }
+                    }
                 },
-                enabled = name.isNotEmpty(),
-            ) { Text("Add") }
+                enabled = name.isNotEmpty() && !loading,
+            ) { Text(if (loading) "Adding…" else "Add") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GroupInfoSheet(
+    conversation: Conversation,
+    model: ChatViewModel,
+    onDismiss: () -> Unit,
+    onAddMember: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    val presence by model.presence.collectAsState()
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(conversation.name(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "${conversation.members.size} members",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+            TextButton(
+                onClick = {
+                    onDismiss()
+                    onAddMember()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
+                Text("Add member")
+            }
+            TextButton(
+                onClick = onLeave,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Leave group", color = MaterialTheme.colorScheme.error)
+            }
+            Spacer(Modifier.height(8.dp))
+            Text("Members", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            LazyColumn(Modifier.fillMaxWidth().height(260.dp).padding(top = 8.dp)) {
+                items(conversation.members, key = { it.username }) { member ->
+                    val isOnline = presence[member.username] ?: presence[member.username.lowercase()] ?: member.online
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Avatar(member.username, 36)
+                        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                            Text(member.username, fontWeight = FontWeight.Medium)
+                            Text(
+                                if (isOnline) "Online" else "Offline",
+                                fontSize = 12.sp,
+                                color = if (isOnline) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1000,12 +1479,20 @@ private fun ForwardSheet(conversations: List<Conversation>, onDismiss: () -> Uni
             LazyColumn(Modifier.fillMaxWidth().height(320.dp)) {
                 items(conversations, key = { it.id }) { conversation ->
                     val on = conversation.id in picked
-                    Text(
-                        if (on) "✓ ${conversation.name()}" else conversation.name(),
-                        modifier = Modifier.fillMaxWidth().clickable {
+                    Row(
+                        Modifier.fillMaxWidth().clickable {
                             picked = if (on) picked - conversation.id else picked + conversation.id
-                        }.padding(vertical = 12.dp),
-                    )
+                        }.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = on,
+                            onCheckedChange = {
+                                picked = if (on) picked - conversation.id else picked + conversation.id
+                            },
+                        )
+                        Text(conversation.name(), modifier = Modifier.padding(start = 8.dp))
+                    }
                 }
             }
             TextButton(onClick = { onSend(picked.toList()) }, enabled = picked.isNotEmpty()) { Text("Send") }
@@ -1108,8 +1595,10 @@ private fun ShareToAirdSheet(
                             } else if (shared.text.isNotEmpty()) {
                                 model.sendTo(targetId, shared.text)
                             }
-                            model.open(targetId)
                         }
+                        // Open only the first conversation so we don't flash
+                        // through every target and lose send state.
+                        targets.firstOrNull()?.let { model.open(it) }
                     }
                 },
                 enabled = selectedIds.isNotEmpty(),

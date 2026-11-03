@@ -39,7 +39,11 @@ class AirdConnectionService : Service() {
                 ChatRepository.onEvent(app, raw)
             }
             // Every (re)connect: catch up on anything sent while the link was down.
-            AirdSocket.addOpenListener { ChatRepository.resyncAsync(app) }
+            AirdSocket.addOpenListener {
+                ChatRepository.resyncAsync(app)
+                CallController.recover(app)
+            }
+            AirdSocket.addStateListener { instance?.refreshIdleNotification() }
         }
         AirdSocket.start(this)
     }
@@ -67,7 +71,7 @@ class AirdConnectionService : Service() {
                 presentIncoming(intent.getBooleanExtra(EXTRA_ALERT, true))
             }
             "joining" -> presentJoining()
-            "idle" -> startAs(listening(), remoteOnly = true)
+            "idle" -> tryStart(listening(), remoteOnly = true)
         }
         return START_STICKY
     }
@@ -188,28 +192,59 @@ class AirdConnectionService : Service() {
         )
     }
 
-    private fun openCall(): PendingIntent = PendingIntent.getActivity(
-        this,
+    private fun openCall(): PendingIntent = activityPending(
         3,
         Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("action", "expand_call")
         },
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    private fun openApp(): PendingIntent = PendingIntent.getActivity(
-        this,
+    private fun acceptCall(call: CallSnapshot): PendingIntent = activityPending(
+        (call.conversationId + "accept").hashCode(),
+        Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("action", "accept_call")
+            putExtra("conversation_id", call.conversationId)
+            putExtra("call_id", call.callId)
+            putExtra("call_mode", call.mode)
+            putExtra("call_from", call.peer)
+        },
+    )
+
+    private fun activityPending(requestCode: Int, intent: Intent): PendingIntent {
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val options = ActivityOptions.makeBasic().apply {
+                setPendingIntentCreatorBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
+                )
+            }
+            return PendingIntent.getActivity(this, requestCode, intent, flags, options.toBundle())
+        }
+        return PendingIntent.getActivity(this, requestCode, intent, flags)
+    }
+
+    private fun openApp(): PendingIntent = activityPending(
         0,
         Intent(this, MainActivity::class.java),
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
+    private fun refreshIdleNotification() {
+        if (CallController.snapshot.value.phase != CallPhase.Idle) return
+        tryStart(listening(), remoteOnly = true)
+    }
+
     private fun listening(): Notification {
+        val text = when {
+            AirdSocket.isOpen() -> "Connected"
+            AirdSocket.failed.value -> "Can't reach server"
+            else -> "Reconnecting…"
+        }
         return NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle("Aird Chat")
-            .setContentText("Connected")
+            .setContentText(text)
             .setContentIntent(openApp())
             .setOngoing(true)
             .setSilent(true)
@@ -256,11 +291,7 @@ class AirdConnectionService : Service() {
     }
 
     private fun incomingNotification(call: CallSnapshot, callStyle: Boolean, alert: Boolean): Notification {
-        val accept = callAction(
-            IncomingCallReceiver.ACTION_ACCEPT,
-            (call.conversationId + "accept").hashCode(),
-            call,
-        )
+        val accept = acceptCall(call)
         val decline = callAction(
             IncomingCallReceiver.ACTION_DECLINE,
             (call.conversationId + "decline").hashCode(),
@@ -274,8 +305,7 @@ class AirdConnectionService : Service() {
             putExtra("call_mode", call.mode)
             putExtra("call_from", call.peer)
         }
-        val openFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        val open = PendingIntent.getActivity(this, ("call-open:" + call.conversationId).hashCode(), openIntent, openFlags)
+        val open = activityPending(("call-open:" + call.conversationId).hashCode(), openIntent)
         val video = call.mode == "video"
         val caller = call.peer.ifEmpty { "Incoming call" }
         val title = if (video) "Incoming video call" else "Incoming voice call"

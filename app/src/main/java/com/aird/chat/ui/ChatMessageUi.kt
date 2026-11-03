@@ -25,36 +25,60 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.emoji2.emojipicker.EmojiPickerView
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.text.ClickableText
@@ -78,16 +102,21 @@ import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import com.aird.chat.ChatPlayback
+import com.aird.chat.data.ChatE2E
+import com.aird.chat.data.ChatRepository
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
 import com.aird.chat.model.ReadReceipt
 import com.aird.chat.model.editAllowed
 import java.time.Instant
 import com.aird.session.AirdHttp
+import com.aird.session.Session
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.enterRiseModifier
 import kotlinx.coroutines.launch
@@ -96,6 +125,18 @@ import kotlin.math.roundToInt
 
 private val Reactions = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 private val Stickers = setOf("😂", "❤️", "🔥", "👍", "🎉", "😍", "🙏", "😎", "🥳", "💯", "✨", "🚀", "🎂", "🌟", "🤝", "💐", "☕", "🎵", "🌈", "📸", "💬", "💪", "🤩", "🤣")
+
+private object VoiceNoteController {
+    val activeKey = MutableStateFlow<String?>(null)
+
+    fun claim(key: String) {
+        activeKey.value = key
+    }
+
+    fun release(key: String) {
+        if (activeKey.value == key) activeKey.value = null
+    }
+}
 
 private object ChatImages {
     @Volatile private var loader: ImageLoader? = null
@@ -126,6 +167,29 @@ private object ChatImages {
     }
 }
 
+private fun ChatAttachment.playsInline(): Boolean {
+    if (voice()) return true
+    if (mediaKind.equals("audio", true)) return true
+    return audio()
+}
+
+private fun formatVoiceTime(ms: Long): String {
+    val total = (ms.coerceAtLeast(0L) / 1000L).toInt()
+    val m = total / 60
+    val s = total % 60
+    return "%d:%02d".format(m, s)
+}
+
+private fun openMentionDm(name: String) {
+    val trimmed = name.trim().removePrefix("@")
+    if (trimmed.isEmpty() || trimmed.equals(Session.username.value, true)) return
+    val matches = ChatRepository.conversations.value.filter { conv ->
+        conv.id.isNotEmpty() && !conv.kind.equals("group", true) && conv.peer.equals(trimmed, true)
+    }
+    val dm = matches.firstOrNull { it.request.isEmpty() } ?: matches.firstOrNull() ?: return
+    ChatRepository.requestOpen(dm.id)
+}
+
 private fun ChatMessage.sticker(): Boolean {
     val text = body.trim()
     if (text.isEmpty() || text.length > 8 || attachments.isNotEmpty()) return false
@@ -153,8 +217,12 @@ fun MessageRow(
     onRetry: () -> Unit,
     pinned: Boolean,
     enter: Boolean = false,
+    selected: Boolean = false,
+    onSelect: (() -> Unit)? = null,
+    onStartSelect: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val reduced = LocalAirdReducedMotion.current
     val scope = rememberCoroutineScope()
     var dragX by remember(message.id) { mutableFloatStateOf(0f) }
@@ -162,6 +230,8 @@ fun MessageRow(
     var gesture by remember(message.id) { mutableIntStateOf(0) }
     val settle = remember(message.id) { Animatable(0f) }
     var menu by remember(message.id) { mutableStateOf(false) }
+    var sheetLocked by remember(message.id) { mutableStateOf(false) }
+    var showEmojiPicker by remember(message.id) { mutableStateOf(false) }
     var nowMs by remember(message.id) { mutableStateOf(System.currentTimeMillis()) }
     androidx.compose.runtime.LaunchedEffect(menu) {
         if (!menu) return@LaunchedEffect
@@ -200,11 +270,22 @@ fun MessageRow(
         }
     }
     Row(
-        Modifier.fillMaxWidth().then(enterRiseModifier(message.id, enter)),
+        Modifier
+            .fillMaxWidth()
+            .then(if (onSelect != null) Modifier.clickable { onSelect() } else Modifier)
+            .then(enterRiseModifier(message.id, enter)),
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
     ) {
+        if (onSelect != null) {
+            Checkbox(
+                checked = selected,
+                onCheckedChange = { onSelect() },
+                modifier = Modifier.padding(horizontal = 6.dp),
+            )
+        }
         Column(
-            Modifier.fillMaxWidth(),
+            Modifier.weight(1f, fill = (onSelect == null)),
             horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
         ) {
             if (!mine) {
@@ -218,7 +299,21 @@ fun MessageRow(
                         messageId = message.id,
                         reduced = reduced,
                         failed = message.failed,
-                        onLongPress = { menu = true },
+                        onLongPress = {
+                            if (onSelect != null) {
+                                onSelect()
+                            } else {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                sheetLocked = true
+                                menu = true
+                            }
+                        },
+                        onLongPressEnd = {
+                            scope.launch {
+                                kotlinx.coroutines.delay(64)
+                                sheetLocked = false
+                            }
+                        },
                         onRetry = onRetry,
                         onDrag = { dragX = it },
                         onRelease = { offset, trigger ->
@@ -239,7 +334,6 @@ fun MessageRow(
                     Text(
                         message.body.trim(),
                         fontSize = 52.sp,
-                        modifier = Modifier.pointerInput(message.id) { detectTapGestures(onLongPress = { menu = true }) },
                     )
                 } else {
                     Bubble(
@@ -256,18 +350,43 @@ fun MessageRow(
                     )
                 }
                 if (menu) {
-                    ModalBottomSheet(onDismissRequest = { menu = false }) {
-                        Row(Modifier.padding(horizontal = 16.dp)) {
+                    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    ModalBottomSheet(
+                        onDismissRequest = {
+                            if (sheetLocked) return@ModalBottomSheet
+                            menu = false
+                            showEmojiPicker = false
+                        },
+                        sheetState = sheetState,
+                    ) {
+                        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Reactions.forEach { emoji ->
                                 Text(
                                     emoji,
                                     fontSize = 22.sp,
                                     modifier = Modifier.clickable {
                                         menu = false
+                                        showEmojiPicker = false
                                         onReact(emoji)
                                     }.padding(6.dp),
                                 )
                             }
+                            IconButton(onClick = { showEmojiPicker = !showEmojiPicker }) {
+                                Icon(Icons.Default.Add, contentDescription = "More reactions")
+                            }
+                        }
+                        if (showEmojiPicker) {
+                            AndroidView(
+                                modifier = Modifier.fillMaxWidth().height(300.dp),
+                                factory = { ctx -> EmojiPickerView(ctx) },
+                                update = { view ->
+                                    view.setOnEmojiPickedListener { item ->
+                                        showEmojiPicker = false
+                                        menu = false
+                                        onReact(item.emoji)
+                                    }
+                                },
+                            )
                         }
                         SheetAction("Reply") { menu = false; onReply() }
                         SheetAction("Copy") {
@@ -275,9 +394,15 @@ fun MessageRow(
                             val clipboard = context.getSystemService(ClipboardManager::class.java)
                             clipboard.setPrimaryClip(ClipData.newPlainText("message", message.body))
                         }
-                        SheetAction("Forward") { menu = false; onForward() }
+                        SheetAction("Forward") {
+                            menu = false
+                            if (onStartSelect != null) onStartSelect() else onForward()
+                        }
                         if (canEdit) SheetAction("Edit") { menu = false; editing = true }
-                        if (message.mine) SheetAction("Delete") { menu = false; confirmDelete = true }
+                        SheetAction("Delete") {
+                            menu = false
+                            if (onStartSelect != null) onStartSelect() else confirmDelete = true
+                        }
                         if (message.attachments.isNotEmpty()) {
                             message.attachments.forEach { attachment ->
                                 val suffix = if (message.attachments.size > 1) " ${attachment.name}" else ""
@@ -317,12 +442,52 @@ fun MessageRow(
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
                 if (message.clock().isNotEmpty()) {
-                    Text(message.clock(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+                    Text(message.clock(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (message.edited) {
-                    Text(" edited", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+                    Text("• edited", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (mine) {
+                    when {
+                        message.failed -> {
+                            Text(
+                                "Failed",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable(onClick = onRetry)
+                            )
+                        }
+                        message.pending -> {
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = "Pending",
+                                modifier = Modifier.size(12.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        seen.isNotEmpty() -> {
+                            Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = "Read",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        else -> {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Sent",
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
             if (message.pending) {
@@ -384,8 +549,10 @@ private fun Bubble(
     onOpen: (ChatAttachment) -> Unit,
     onFile: (ChatAttachment) -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val fg = if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    val defaultBg = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+    val defaultBg = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val targetBg = if (highlighted) MaterialTheme.colorScheme.tertiaryContainer else defaultBg
     val animatedBg by animateColorAsState(
         targetValue = targetBg,
@@ -417,37 +584,81 @@ private fun Bubble(
         }
 
         message.attachments.forEach { attachment ->
-            val gestures = Modifier.pointerInput(message.id, attachment.url) {
+            val voice = attachment.voice() && attachment.url.isNotBlank()
+            val playable = !voice && attachment.playsInline() && attachment.url.isNotBlank()
+            val gestures = Modifier.pointerInput(message.id, attachment.url, playable, voice) {
                 detectTapGestures(
                     onTap = {
-                        if (attachment.visual() || attachment.video()) onOpen(attachment) else onFile(attachment)
+                        when {
+                            voice -> Unit
+                            attachment.visual() || attachment.video() -> onOpen(attachment)
+                            playable -> ChatPlayback.play(
+                                context,
+                                attachment.url,
+                                attachment.name.ifBlank { "Audio" },
+                            )
+                            else -> onFile(attachment)
+                        }
                     },
                 )
             }
             Column(Modifier.fillMaxWidth()) {
-                if (attachment.visual()) {
-                    AttachmentImage(
-                        attachment,
-                        Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)).then(gestures),
-                    )
-                } else {
-                    Column(modifier = gestures.padding(vertical = 4.dp)) {
-                        Text(
-                            "📎 ${attachment.name}",
-                            color = fg,
-                            fontWeight = FontWeight.SemiBold,
+                when {
+                    attachment.visual() -> {
+                        AttachmentImage(
+                            attachment,
+                            Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)).then(gestures),
                         )
-                        Text(
-                            "Tap to download",
-                            color = fg.copy(alpha = 0.7f),
-                            fontSize = 12.sp,
+                    }
+                    voice -> {
+                        VoiceNoteBubble(
+                            messageId = message.id,
+                            attachment = attachment,
+                            fg = fg,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                         )
+                    }
+                    else -> {
+                        Column(modifier = gestures.padding(vertical = 4.dp)) {
+                            Text(
+                                "📎 ${attachment.name}",
+                                color = fg,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                if (playable) "Tap to play" else "Tap to download",
+                                color = fg.copy(alpha = 0.7f),
+                                fontSize = 12.sp,
+                            )
+                        }
                     }
                 }
                 AttachmentProgressBar(message.id, attachment.index, fg)
             }
         }
-        if (message.body.isNotBlank() && message.body != "Encrypted message" || message.attachments.isEmpty()) {
+        if (message.e2e && !message.decryptOk) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 4.dp),
+            ) {
+                Text("🔒", fontSize = 16.sp)
+                Text(
+                    " Waiting for key…",
+                    color = fg.copy(alpha = 0.7f),
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            ChatE2E.prepare(context, Session.username.value)
+                        }
+                    },
+                ) {
+                    Text("Retry", color = fg)
+                }
+            }
+        } else if (message.body.isNotBlank() && message.body != "Encrypted message" || message.attachments.isEmpty()) {
             if (message.body.isNotBlank()) {
                 MessageBodyText(message.body, fg, mine)
             }
@@ -635,6 +846,132 @@ private fun MediaViewer(messageId: String, attachment: ChatAttachment, onDismiss
 }
 
 @Composable
+private fun VoiceNoteBubble(
+    messageId: String,
+    attachment: ChatAttachment,
+    fg: Color,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val key = remember(messageId, attachment.index, attachment.url) {
+        "$messageId:${attachment.index}:${attachment.url}"
+    }
+    val activeKey by VoiceNoteController.activeKey.collectAsState()
+    var playing by remember(key) { mutableStateOf(false) }
+    var positionMs by remember(key) { mutableLongStateOf(0L) }
+    var durationMs by remember(key) { mutableLongStateOf(0L) }
+    var scrubbing by remember(key) { mutableStateOf(false) }
+    val player = remember(key) {
+        val source = OkHttpDataSource.Factory(AirdHttp.client)
+        ExoPlayer.Builder(context.applicationContext)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(source))
+            .build()
+            .apply {
+                setMediaItem(MediaItem.fromUri(AirdHttp.absolute(context, attachment.url)))
+                prepare()
+            }
+    }
+    DisposableEffect(player, key) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                playing = isPlaying
+                if (isPlaying) VoiceNoteController.claim(key)
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    playing = false
+                    positionMs = 0L
+                    player.seekTo(0L)
+                    player.pause()
+                    VoiceNoteController.release(key)
+                }
+                val d = player.duration
+                if (d > 0) durationMs = d
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+            VoiceNoteController.release(key)
+        }
+    }
+    LaunchedEffect(activeKey, key) {
+        if (activeKey != null && activeKey != key && playing) {
+            player.pause()
+            playing = false
+        }
+    }
+    LaunchedEffect(player, playing, scrubbing) {
+        while (isActive) {
+            if (!scrubbing) {
+                positionMs = player.currentPosition.coerceAtLeast(0L)
+                val d = player.duration
+                if (d > 0) durationMs = d
+            }
+            delay(200)
+        }
+    }
+    val total = durationMs.coerceAtLeast(1L).toFloat()
+    val progress = (positionMs.toFloat() / total).coerceIn(0f, 1f)
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(
+            onClick = {
+                if (playing) {
+                    player.pause()
+                    playing = false
+                    VoiceNoteController.release(key)
+                } else {
+                    VoiceNoteController.claim(key)
+                    player.play()
+                    playing = true
+                }
+            },
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(fg.copy(alpha = 0.16f)),
+        ) {
+            Icon(
+                if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (playing) "Pause" else "Play",
+                tint = fg,
+            )
+        }
+        Column(
+            modifier = Modifier.weight(1f).padding(start = 6.dp),
+        ) {
+            Slider(
+                value = progress,
+                onValueChange = { value ->
+                    scrubbing = true
+                    positionMs = (value * total).toLong()
+                },
+                onValueChangeFinished = {
+                    player.seekTo(positionMs)
+                    scrubbing = false
+                },
+                modifier = Modifier.fillMaxWidth().height(20.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = fg,
+                    activeTrackColor = fg,
+                    inactiveTrackColor = fg.copy(alpha = 0.28f),
+                ),
+            )
+            Text(
+                "${formatVoiceTime(positionMs)} / ${formatVoiceTime(durationMs)}",
+                color = fg.copy(alpha = 0.75f),
+                fontSize = 11.sp,
+            )
+        }
+    }
+}
+
+@Composable
 private fun VideoPlayer(attachment: ChatAttachment) {
     val context = LocalContext.current
     val player = remember(attachment.url) {
@@ -667,15 +1004,35 @@ private fun MessageBodyText(text: String, fg: Color, mine: Boolean) {
     val context = LocalContext.current
     val linkColor = if (mine) fg.copy(alpha = 0.92f) else MaterialTheme.colorScheme.primary
     val annotated = remember(text, fg, linkColor) { buildMessageText(text, fg, linkColor) }
-    ClickableText(
-        text = annotated,
-        style = TextStyle(color = fg, fontSize = 16.sp),
-        onClick = { offset ->
-            annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { span ->
-                openHttpUrl(context, span.item)
-            }
-        },
-    )
+    var expanded by remember { mutableStateOf(false) }
+    val isLong = text.length > 350 || text.count { it == '\n' } >= 8
+
+    Column {
+        ClickableText(
+            text = annotated,
+            style = TextStyle(color = fg, fontSize = 16.sp),
+            maxLines = if (!isLong || expanded) Int.MAX_VALUE else 8,
+            overflow = TextOverflow.Ellipsis,
+            onClick = { offset ->
+                annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { span ->
+                    openHttpUrl(context, span.item)
+                    return@ClickableText
+                }
+                annotated.getStringAnnotations("MENTION", offset, offset).firstOrNull()?.let { span ->
+                    openMentionDm(span.item)
+                }
+            },
+        )
+        if (isLong) {
+            Text(
+                if (expanded) "Show less" else "Show more",
+                color = linkColor,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.clickable { expanded = !expanded }.padding(top = 2.dp),
+            )
+        }
+    }
 }
 
 private fun buildMessageText(text: String, fg: Color, linkColor: Color): AnnotatedString = buildAnnotatedString {
@@ -699,7 +1056,10 @@ private fun buildMessageText(text: String, fg: Color, linkColor: Color): Annotat
                 val parts = token.split(':')
                 val from = parts[1].toInt()
                 val to = parts[2].toInt()
-                withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = fg)) { append(text.substring(from, to)) }
+                val raw = text.substring(from, to)
+                pushStringAnnotation("MENTION", raw.removePrefix("@"))
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = fg)) { append(raw) }
+                pop()
                 index = to
             }
             token.startsWith("u:") -> {
@@ -718,58 +1078,94 @@ private fun buildMessageText(text: String, fg: Color, linkColor: Color): Annotat
     if (index < text.length) append(text.substring(index))
 }
 
+private enum class MessagePress { LongPress, Drag, Up, Scroll, Cancel }
+
 private fun Modifier.replySwipeGestures(
     messageId: String,
     reduced: Boolean,
     failed: Boolean,
     onLongPress: () -> Unit,
+    onLongPressEnd: () -> Unit,
     onRetry: () -> Unit,
     onDrag: (Float) -> Unit,
     onRelease: (offset: Float, triggerReply: Boolean) -> Unit,
     onDragStart: () -> Unit,
 ): Modifier = pointerInput(messageId, reduced, failed) {
-    if (reduced) return@pointerInput
     val replyThreshold = 72.dp.toPx()
     val maxDrag = 180.dp.toPx()
     val touchSlop = viewConfiguration.touchSlop
+    val longPressTimeout = viewConfiguration.longPressTimeoutMillis
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         val pointerId = down.id
         var offsetX = 0f
         var offsetY = 0f
-        var horizontal = false
-        var longPressFired = false
-        val startedAt = System.currentTimeMillis()
-        onDragStart()
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-            if (!change.pressed) break
-            val delta = change.positionChange()
-            offsetX += delta.x
-            offsetY += delta.y
-            if (!horizontal && !longPressFired &&
-                System.currentTimeMillis() - startedAt >= viewConfiguration.longPressTimeoutMillis &&
-                abs(offsetX) < touchSlop && abs(offsetY) < touchSlop
-            ) {
-                longPressFired = true
-                onLongPress()
-            }
-            if (!horizontal) {
-                if (abs(offsetX) > touchSlop && abs(offsetX) > abs(offsetY) * 1.05f) {
-                    horizontal = true
+        var press = MessagePress.LongPress
+        try {
+            // Wake on the system long-press timeout. A still finger does not produce pointer events.
+            withTimeout(longPressTimeout) {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == pointerId }
+                    if (change == null) {
+                        press = MessagePress.Cancel
+                        return@withTimeout
+                    }
+                    if (!change.pressed) {
+                        press = MessagePress.Up
+                        return@withTimeout
+                    }
+                    val delta = change.positionChange()
+                    offsetX += delta.x
+                    offsetY += delta.y
+                    val absX = abs(offsetX)
+                    val absY = abs(offsetY)
+                    if (absX > touchSlop && absX > absY * 1.05f) {
+                        if (reduced) {
+                            press = MessagePress.Scroll
+                        } else {
+                            change.consume()
+                            press = MessagePress.Drag
+                        }
+                        return@withTimeout
+                    }
+                    if (absY > touchSlop && absY >= absX) {
+                        press = MessagePress.Scroll
+                        return@withTimeout
+                    }
                 }
             }
-            if (horizontal) {
-                change.consume()
-                onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
-            }
+        } catch (_: PointerEventTimeoutCancellationException) {
+            press = MessagePress.LongPress
         }
-        if (horizontal) {
-            val trigger = abs(offsetX) > replyThreshold
-            onRelease(offsetX, trigger)
-        } else if (!longPressFired && abs(offsetX) < touchSlop && abs(offsetY) < touchSlop) {
-            if (failed) onRetry()
+        when (press) {
+            MessagePress.LongPress -> {
+                onLongPress()
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                    change.consume()
+                    if (!change.pressed) break
+                }
+                onLongPressEnd()
+            }
+            MessagePress.Drag -> {
+                onDragStart()
+                onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                    if (!change.pressed) break
+                    offsetX += change.positionChange().x
+                    change.consume()
+                    onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
+                }
+                onRelease(offsetX, abs(offsetX) > replyThreshold)
+            }
+            MessagePress.Up -> {
+                if (failed && abs(offsetX) < touchSlop && abs(offsetY) < touchSlop) onRetry()
+            }
+            MessagePress.Scroll, MessagePress.Cancel -> Unit
         }
     }
 }
