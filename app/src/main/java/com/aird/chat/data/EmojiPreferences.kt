@@ -49,8 +49,26 @@ object EmojiPreferences {
     private fun canAcceptSkinTone(emoji: String): Boolean {
         if (emoji.isEmpty()) return false
         val cp = emoji.codePointAt(0)
-        return (cp in 0x1F440..0x1F490) || (cp in 0x1F650..0x1F6CC) ||
-               (cp in 0x1F90C..0x1F93F) || (cp in 0x1F970..0x1F9DF) ||
-               (cp in 0x2600..0x27BF) || (cp in 0x1F380..0x1F3C4)
+        return when (cp) {
+            0x261D, 0x270A, 0x270B, 0x270C, 0x270D -> true
+            in 0x1F442..0x1F443 -> true
+            in 0x1F446..0x1F450 -> true
+            in 0x1F466..0x1F490 -> true
+            0x1F4AA -> true
+            0x1F590, 0x1F595, 0x1F596 -> true
+            in 0x1F645..0x1F64F -> true  // Gesturing people (🙅🙆🙇🙋🙌), NOT smileys (0x1F600..0x1F644)
+            0x1F6AC -> true
+            in 0x1F6B4..0x1F6B6 -> true
+            0x1F6C0, 0x1F6CC -> true
+            0x1F90C, 0x1F90F -> true
+            in 0x1F918..0x1F91F -> true
+            0x1F926 -> true
+            in 0x1F930..0x1F93E -> true
+            0x1F977 -> true
+            in 0x1F9B5..0x1F9B9 -> true
+            in 0x1F9D1..0x1F9DD -> true
+            in 0x1FAF0..0x1FAF8 -> true  // Hand gestures (🫱🫲🫷🫸🫶🫰)
+            else -> false
+        }
     }
 }
