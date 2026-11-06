@@ -43,6 +43,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.emoji2.emojipicker.EmojiPickerView
+import com.aird.chat.data.EmojiPreferences
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -383,7 +384,8 @@ fun MessageRow(
                                     view.setOnEmojiPickedListener { item ->
                                         showEmojiPicker = false
                                         menu = false
-                                        onReact(item.emoji)
+                                        val chosen = EmojiPreferences.applySkinTone(item.emoji, view.context)
+                                        onReact(chosen)
                                     }
                                 },
                             )
@@ -393,6 +395,14 @@ fun MessageRow(
                             menu = false
                             val clipboard = context.getSystemService(ClipboardManager::class.java)
                             clipboard.setPrimaryClip(ClipData.newPlainText("message", message.body))
+                        }
+                        if (message.body.isNotBlank() && (!message.e2e || message.decryptOk) &&
+                            !message.body.equals("Encrypted message", true)
+                        ) {
+                            SheetAction("Share") {
+                                menu = false
+                                sharePlainText(context, message.body)
+                            }
                         }
                         SheetAction("Forward") {
                             menu = false
@@ -417,6 +427,12 @@ fun MessageRow(
                                 SheetAction("Open$suffix") {
                                     menu = false
                                     scope.launch { openChatAttachment(context, message.id, attachment) }
+                                }
+                                if (!message.e2e || message.decryptOk) {
+                                    SheetAction("Share$suffix") {
+                                        menu = false
+                                        scope.launch { shareChatAttachment(context, message.id, attachment) }
+                                    }
                                 }
                                 if (attachment.shareUrl.isNotBlank()) {
                                     SheetAction("Open in Aird") {
@@ -1096,7 +1112,7 @@ private fun Modifier.replySwipeGestures(
     val touchSlop = viewConfiguration.touchSlop
     val longPressTimeout = viewConfiguration.longPressTimeoutMillis
     awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Main)
         val pointerId = down.id
         var offsetX = 0f
         var offsetY = 0f
@@ -1105,9 +1121,9 @@ private fun Modifier.replySwipeGestures(
             // Wake on the system long-press timeout. A still finger does not produce pointer events.
             withTimeout(longPressTimeout) {
                 while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val event = awaitPointerEvent(PointerEventPass.Main)
                     val change = event.changes.firstOrNull { it.id == pointerId }
-                    if (change == null) {
+                    if (change == null || change.isConsumed) {
                         press = MessagePress.Cancel
                         return@withTimeout
                     }
@@ -1142,7 +1158,7 @@ private fun Modifier.replySwipeGestures(
             MessagePress.LongPress -> {
                 onLongPress()
                 while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val event = awaitPointerEvent(PointerEventPass.Main)
                     val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                     change.consume()
                     if (!change.pressed) break
@@ -1153,9 +1169,9 @@ private fun Modifier.replySwipeGestures(
                 onDragStart()
                 onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
                 while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val event = awaitPointerEvent(PointerEventPass.Main)
                     val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                    if (!change.pressed) break
+                    if (!change.pressed || change.isConsumed) break
                     offsetX += change.positionChange().x
                     change.consume()
                     onDrag(offsetX.coerceIn(-maxDrag, maxDrag))

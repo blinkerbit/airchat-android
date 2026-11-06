@@ -134,6 +134,50 @@ suspend fun openChatAttachment(context: Context, messageId: String, attachment: 
         }
     }
 
+fun newCaptureUri(context: Context, extension: String): Uri {
+    val dir = File(context.cacheDir, "chat-files").apply { mkdirs() }
+    val file = File(dir, "camera-${System.currentTimeMillis()}.$extension")
+    file.createNewFile()
+    return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+fun sharePlainText(context: Context, text: String) {
+    val body = text.trim()
+    if (body.isEmpty() || body.equals("Encrypted message", true)) return
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, body)
+    }
+    context.startActivity(Intent.createChooser(send, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
+suspend fun shareChatAttachment(context: Context, messageId: String, attachment: ChatAttachment): Boolean =
+    withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        try {
+            val dest = ensureAppFile(app, messageId, attachment) ?: return@withContext false
+            val name = safeChatFileName(attachment.name)
+            val guessedMime = guessChatMime(dest.name, attachment.mediaKind)
+            val mime = if (guessedMime != "application/octet-stream") guessedMime else "application/octet-stream"
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", dest)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = android.content.ClipData.newRawUri(name, uri)
+            }
+            withContext(Dispatchers.Main) {
+                app.startActivity(Intent.createChooser(send, "Share $name").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            true
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: Exception) {
+            toast(app, "Could not share this file")
+            false
+        }
+    }
+
 fun openAirdShareInBrowser(context: Context, shareUrl: String) {
     val path = shareUrl.trim()
     if (path.isEmpty()) return

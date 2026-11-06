@@ -4,7 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -81,6 +84,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -96,6 +100,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -107,6 +112,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aird.AppLock
 import com.aird.MainActivity
 import com.aird.call.CallController
 import com.aird.call.CallPhase
@@ -156,20 +162,36 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     var shared by remember { mutableStateOf(false) }
     var keys by remember { mutableStateOf(false) }
     var enhanced by remember { mutableStateOf(false) }
+    var settings by remember { mutableStateOf(false) }
     val themeId by ThemeStore.id.collectAsState()
+    val locked by AppLock.locked.collectAsState()
+    val wantSearch by MainActivity.openSearch.collectAsState()
     val openChat = conversations.firstOrNull { it.id == active }
+    val wide = LocalConfiguration.current.screenWidthDp >= 720
+    val overlay = files || search || shared || keys || enhanced || settings
 
     LaunchedEffect(Unit) { model.refresh() }
+    DisposableEffect(Unit) {
+        onDispose { MainActivity.secureChat.value = false }
+    }
+    LaunchedEffect(enhanced) { MainActivity.secureChat.value = enhanced }
     LaunchedEffect(conversations) {
         UnreadBadge.apply(context, conversations.sumOf { it.unread })
     }
-    LaunchedEffect(pending) {
-        if (pending.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(pending, locked) {
+        if (locked || pending.isEmpty()) return@LaunchedEffect
         val id = pending
         ChatRepository.consumePending()
         model.open(id)
     }
-    LaunchedEffect(active) {
+    LaunchedEffect(wantSearch, locked, wide) {
+        if (!wantSearch || locked) return@LaunchedEffect
+        MainActivity.openSearch.value = false
+        if (active.isNotEmpty() && !wide) model.back()
+        searchActive = true
+    }
+    BackHandler(enabled = active.isNotEmpty() && !overlay) { model.back() }
+    LaunchedEffect(active, wide) {
         sheet = false
         menu = false
         themeMenu = false
@@ -177,10 +199,10 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         confirmLeave = false
         groupInfo = false
         confirmDeleteChat = false
-        if (active.isNotEmpty()) {
+        if (active.isNotEmpty() && !wide) {
             searchActive = false
             searchQuery = ""
-        } else {
+        } else if (active.isEmpty()) {
             chatSearchActive = false
             chatSearchQuery = ""
         }
@@ -197,7 +219,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                     titleContentColor = MaterialTheme.colorScheme.onSurface,
                 ),
                 title = {
-                    if (active.isEmpty() && searchActive) {
+                    if (searchActive && (active.isEmpty() || wide)) {
                         OutlinedTextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
@@ -311,6 +333,13 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                 },
                             )
                             DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = {
+                                    menu = false
+                                    settings = true
+                                },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Sign out") },
                                 onClick = {
                                     menu = false
@@ -403,19 +432,44 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                 Text(banner, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
             val reduced = LocalAirdReducedMotion.current
-            AnimatedContent(
-                targetState = active.isEmpty(),
-                modifier = Modifier.fillMaxSize(),
-                transitionSpec = {
-                    if (reduced) {
-                        ContentTransform(EnterTransition.None, ExitTransition.None, sizeTransform = null)
-                    } else {
-                        ContentTransform(fadeIn(tween(200)), fadeOut(tween(180)), sizeTransform = null)
+            if (wide) {
+                Row(Modifier.fillMaxSize()) {
+                    ConversationList(
+                        conversations,
+                        model,
+                        searchQuery,
+                        selectedId = active,
+                        modifier = Modifier.weight(0.38f).fillMaxHeight(),
+                    )
+                    Box(Modifier.weight(0.62f).fillMaxHeight()) {
+                        if (active.isEmpty()) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    "Select a conversation",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            }
+                        } else {
+                            Thread(model, openChat, chatSearchQuery)
+                        }
                     }
-                },
-                label = "conversation",
-            ) { showList ->
-                if (showList) ConversationList(conversations, model, searchQuery) else Thread(model, openChat, chatSearchQuery)
+                }
+            } else {
+                AnimatedContent(
+                    targetState = active.isEmpty(),
+                    modifier = Modifier.fillMaxSize(),
+                    transitionSpec = {
+                        if (reduced) {
+                            ContentTransform(EnterTransition.None, ExitTransition.None, sizeTransform = null)
+                        } else {
+                            ContentTransform(fadeIn(tween(200)), fadeOut(tween(180)), sizeTransform = null)
+                        }
+                    },
+                    label = "conversation",
+                ) { showList ->
+                    if (showList) ConversationList(conversations, model, searchQuery) else Thread(model, openChat, chatSearchQuery)
+                }
             }
         }
     }
@@ -468,8 +522,10 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
             dismissButton = { TextButton(onClick = { confirmDeleteChat = false }) { Text("Cancel") } },
         )
     }
-    pendingShare?.let { sharedContent ->
-        ShareToAirdSheet(shared = sharedContent, model = model, onDismiss = { MainActivity.sharedContent.value = null })
+    if (!locked) {
+        pendingShare?.let { sharedContent ->
+            ShareToAirdSheet(shared = sharedContent, model = model, onDismiss = { MainActivity.sharedContent.value = null })
+        }
     }
     if (files) AirdFilesScreen(startPath = filePath, onBack = { files = false })
     if (search) {
@@ -486,12 +542,16 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     if (shared) SharedWithMeScreen(onBack = { shared = false })
     if (keys) KeyBackupSheet(onDismiss = { keys = false })
     if (enhanced) EnhancedSecureScreen(onBack = { enhanced = false })
+    if (settings) AppSettingsSheet(onDismiss = { settings = false })
+    BackHandler(enabled = shared) { shared = false }
+    BackHandler(enabled = keys) { keys = false }
+    BackHandler(enabled = enhanced) { enhanced = false }
+    BackHandler(enabled = settings) { settings = false }
     }
 }
 
 @Composable
 private fun ThreadTitle(conversation: Conversation?, model: ChatViewModel) {
-    val typing by model.typing.collectAsState()
     val presence by model.presence.collectAsState()
 
     val isPeerOnline = if (conversation != null && conversation.kind == "dm") {
@@ -505,7 +565,6 @@ private fun ThreadTitle(conversation: Conversation?, model: ChatViewModel) {
     } else 0
 
     val subtitle = when {
-        typing.isNotEmpty() -> "$typing is typing…"
         conversation == null -> "end-to-end encrypted"
         conversation.kind == "group" -> {
             val muted = if (conversation.muted) " · muted" else ""
@@ -607,10 +666,16 @@ private fun CallButtons(conversationId: String, peer: String) {
 }
 
 @Composable
-private fun ConversationList(items: List<Conversation>, model: ChatViewModel, query: String = "") {
+private fun ConversationList(
+    items: List<Conversation>,
+    model: ChatViewModel,
+    query: String = "",
+    selectedId: String = "",
+    modifier: Modifier = Modifier.fillMaxSize(),
+) {
     val q = query.trim()
     val shown = filterConversations(items, q)
-    Column(Modifier.fillMaxSize()) {
+    Column(modifier) {
         if (shown.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
@@ -632,7 +697,11 @@ private fun ConversationList(items: List<Conversation>, model: ChatViewModel, qu
                 Surface(
                     onClick = { model.open(conversation.id) },
                     shape = RoundedCornerShape(16.dp),
-                    color = if (unread) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f) else Color.Transparent,
+                    color = when {
+                        conversation.id == selectedId && selectedId.isNotEmpty() -> MaterialTheme.colorScheme.secondaryContainer
+                        unread -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        else -> Color.Transparent
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -739,6 +808,7 @@ private object ChatScrollStore {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuery: String = "") {
+    val context = LocalContext.current
     val messages by model.messages.collectAsState()
     val receipts by model.receipts.collectAsState()
     val pins by model.pins.collectAsState()
@@ -785,13 +855,49 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     var pinCursor by remember(conversation?.id) { mutableStateOf(0) }
     val density = LocalDensity.current
     val ime = WindowInsets.ime.getBottom(density)
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+    fun sendUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         val caption = draft.trim()
         draft = ""
         panel = ""
         model.attach(uris.take(10), caption, reply?.id)
         reply = null
+    }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        sendUris(uris)
+    }
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    var cameraVideo by remember { mutableStateOf(false) }
+    val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val uri = cameraUri
+        if (ok && uri != null) sendUris(listOf(uri))
+    }
+    val takeVideo = rememberLauncherForActivityResult(ActivityResultContracts.CaptureVideo()) { ok ->
+        val uri = cameraUri
+        if (ok && uri != null) sendUris(listOf(uri))
+    }
+    fun launchCapture(video: Boolean) {
+        val uri = newCaptureUri(context, if (video) "mp4" else "jpg")
+        cameraUri = uri
+        if (video) takeVideo.launch(uri) else takePhoto.launch(uri)
+    }
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) launchCapture(cameraVideo)
+    }
+    fun ensureCamera(video: Boolean) {
+        cameraVideo = video
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (granted) launchCapture(video) else cameraPermission.launch(Manifest.permission.CAMERA)
+    }
+    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
+        sendUris(uris)
+    }
+    fun launchPhotos() {
+        if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+            photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+        } else {
+            picker.launch(arrayOf("image/*", "video/*"))
+        }
     }
     val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
@@ -1094,8 +1200,31 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
             )
-            else -> Composer(
-                draft = draft,
+            else -> {
+                val typingStatus by model.typing.collectAsState()
+                val isTyping = typingStatus.isNotEmpty() && typingStatus != me
+                AnimatedVisibility(
+                    visible = isTyping,
+                    enter = fadeIn(tween(150)),
+                    exit = fadeOut(tween(150)),
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 18.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Start,
+                    ) {
+                        Text(
+                            text = "$typingStatus is typing…",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                Composer(
+                    draft = draft,
                 onDraft = {
                     draft = it
                     model.typing()
@@ -1134,6 +1263,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                     model.attach(listOf(uri), caption, replyId, if (voice) "voice" else null)
                 },
             )
+            }
         }
     }
     if (forward.isNotEmpty()) {
@@ -1175,18 +1305,27 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     }
     if (attachChoice) {
         ModalBottomSheet(onDismissRequest = { attachChoice = false }) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
+            Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                TextButton(onClick = {
+                    attachChoice = false
+                    launchPhotos()
+                }, modifier = Modifier.fillMaxWidth()) { Text("Photos and videos") }
+                TextButton(onClick = {
+                    attachChoice = false
+                    ensureCamera(false)
+                }, modifier = Modifier.fillMaxWidth()) { Text("Take photo") }
+                TextButton(onClick = {
+                    attachChoice = false
+                    ensureCamera(true)
+                }, modifier = Modifier.fillMaxWidth()) { Text("Record video") }
                 TextButton(onClick = {
                     attachChoice = false
                     picker.launch(arrayOf("*/*"))
-                }) { Text("From this device") }
+                }, modifier = Modifier.fillMaxWidth()) { Text("From this device") }
                 TextButton(onClick = {
                     attachChoice = false
                     picking = true
-                }) { Text("From Aird") }
+                }, modifier = Modifier.fillMaxWidth()) { Text("From Aird") }
             }
         }
     }

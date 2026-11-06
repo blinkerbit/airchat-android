@@ -161,14 +161,20 @@ object AirdHttp {
 private class AndroidCookieJar : CookieJar {
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         val manager = CookieManager.getInstance()
-        cookies.forEach { manager.setCookie(url.toString(), it.toString()) }
+        val httpScheme = if (url.scheme == "wss" || url.scheme == "https") "https" else "http"
+        val httpUrl = url.newBuilder().scheme(httpScheme).build().toString()
+        cookies.forEach { manager.setCookie(httpUrl, it.toString()) }
         manager.flush()
     }
 
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
         val manager = CookieManager.getInstance()
-        val header = manager.getCookie(url.toString())
-            ?: manager.getCookie("${url.scheme}://${url.host}")
+        val httpScheme = if (url.scheme == "wss" || url.scheme == "https") "https" else "http"
+        val httpUrl = url.newBuilder().scheme(httpScheme).build()
+        val hostUrl = "$httpScheme://${url.host}"
+        val header = manager.getCookie(httpUrl.toString())
+            ?: manager.getCookie(hostUrl)
+            ?: manager.getCookie(url.toString())
             ?: return emptyList()
         return header.split(';').mapNotNull { part ->
             val trimmed = part.trim()
@@ -177,7 +183,7 @@ private class AndroidCookieJar : CookieJar {
             if (name.equals("Path", true) || name.equals("Expires", true) || name.equals("Max-Age", true)) {
                 return@mapNotNull null
             }
-            Cookie.parse(url, trimmed)
+            Cookie.parse(httpUrl, trimmed)
         }
     }
 }

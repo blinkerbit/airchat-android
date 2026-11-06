@@ -3,6 +3,7 @@ package com.aird.chat.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -15,6 +16,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.emoji2.emojipicker.EmojiPickerView
+import com.aird.chat.data.EmojiPreferences
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -23,6 +26,9 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -30,6 +36,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -38,19 +46,26 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -62,7 +77,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -120,6 +134,12 @@ fun Composer(
     var recording by remember { mutableStateOf(false) }
     var elapsed by remember { mutableIntStateOf(0) }
     var recordStartedAt by remember { mutableLongStateOf(0L) }
+    var pendingVoice by remember { mutableStateOf<File?>(null) }
+    var voiceMs by remember { mutableIntStateOf(0) }
+    var playMs by remember { mutableIntStateOf(0) }
+    var playing by remember { mutableStateOf(false) }
+    val playerState = remember { mutableStateOf<MediaPlayer?>(null) }
+    var player by playerState
     var cursor by remember { mutableIntStateOf(draft.length) }
     var caretRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val draftSink = rememberUpdatedState(onDraft)
@@ -161,21 +181,99 @@ fun Composer(
         }
     }
 
+    fun stopPlayback() {
+        val mp = playerState.value
+        playerState.value = null
+        playing = false
+        playMs = 0
+        if (mp != null) {
+            runCatching { mp.stop() }
+            runCatching { mp.release() }
+        }
+    }
+
+    fun discardVoice() {
+        stopPlayback()
+        val file = pendingVoice ?: audioFile
+        pendingVoice = null
+        audioFile = null
+        voiceMs = 0
+        elapsed = 0
+        runCatching { file?.delete() }
+    }
+
+    fun cancelRecording() {
+        val mr = recorder
+        recorder = null
+        recording = false
+        if (mr != null) {
+            runCatching { mr.stop() }
+            runCatching { mr.release() }
+        }
+        discardVoice()
+    }
+
     fun finishRecording() {
         val mr = recorder
         val file = audioFile
+        val taken = elapsed
         recorder = null
-        audioFile = null
         recording = false
-        elapsed = 0
         if (mr != null) {
             runCatching { mr.stop() }
             runCatching { mr.release() }
         }
         if (file != null && file.exists() && file.length() > 0L) {
-            sendingName = file.name
-            onContent(Uri.fromFile(file), "audio/mp4", true)
+            pendingVoice = file
+            voiceMs = (taken.coerceAtLeast(1) * 1000)
+            playMs = 0
+        } else {
+            discardVoice()
         }
+    }
+
+    fun toggleVoicePlayback() {
+        val file = pendingVoice ?: return
+        val existing = playerState.value
+        if (existing != null) {
+            if (playing) {
+                existing.pause()
+                playing = false
+            } else {
+                existing.start()
+                playing = true
+            }
+            return
+        }
+        val mp = MediaPlayer()
+        try {
+            mp.setDataSource(file.absolutePath)
+            mp.setOnCompletionListener {
+                playing = false
+                playMs = 0
+                runCatching { it.seekTo(0) }
+            }
+            mp.setOnPreparedListener {
+                val duration = it.duration
+                if (duration > 0) voiceMs = duration
+                it.start()
+                playing = true
+            }
+            player = mp
+            mp.prepareAsync()
+        } catch (_: Exception) {
+            runCatching { mp.release() }
+            playing = false
+        }
+    }
+
+    fun sendVoice() {
+        val file = pendingVoice ?: return
+        stopPlayback()
+        pendingVoice = null
+        audioFile = null
+        sendingName = file.name
+        onContent(Uri.fromFile(file), "audio/mp4", true)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -200,13 +298,37 @@ fun Composer(
         onDispose {
             val mr = recorderState.value
             val file = audioFileState.value
+            val mp = playerState.value
             recorderState.value = null
             audioFileState.value = null
+            playerState.value = null
             if (mr != null) {
                 runCatching { mr.stop() }
                 runCatching { mr.release() }
-                if (file != null) runCatching { file.delete() }
             }
+            if (mp != null) {
+                runCatching { mp.stop() }
+                runCatching { mp.release() }
+            }
+            if (file != null) runCatching { file.delete() }
+        }
+    }
+    LaunchedEffect(playing) {
+        if (!playing) return@LaunchedEffect
+        while (true) {
+            playMs = playerState.value?.currentPosition ?: playMs
+            delay(200)
+        }
+    }
+    var voiceChat by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(activeId) {
+        if (voiceChat == null) {
+            voiceChat = activeId
+            return@LaunchedEffect
+        }
+        if (voiceChat != activeId) {
+            voiceChat = activeId
+            cancelRecording()
         }
     }
 
@@ -349,13 +471,86 @@ fun Composer(
         }
 
         val canSend = draft.isNotBlank() && !uploading
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(26.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(26.dp))
-                .padding(horizontal = 4.dp, vertical = 3.dp),
+        val voiceMode = when {
+            recording -> 1
+            pendingVoice != null -> 2
+            else -> 0
+        }
+        val pill = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(26.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(26.dp))
+            .padding(horizontal = 4.dp, vertical = 3.dp)
+        AnimatedContent(
+            targetState = voiceMode,
+            modifier = Modifier.fillMaxWidth(),
+            transitionSpec = {
+                if (reduced) {
+                    EnterTransition.None togetherWith ExitTransition.None
+                } else {
+                    (fadeIn(tween(180)) + slideInHorizontally { it / 6 }) togetherWith
+                        (fadeOut(tween(140)) + slideOutHorizontally { -it / 8 })
+                }
+            },
+            label = "voice-composer",
+        ) { mode ->
+        if (mode == 1) {
+            Row(pill, verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { cancelRecording() }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "Discard recording", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                }
+                Box(
+                    modifier = Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error)
+                )
+                Text(
+                    formatElapsed(elapsed),
+                    modifier = Modifier.padding(start = 8.dp).weight(1f),
+                    color = MaterialTheme.colorScheme.error,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text("Recording", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f), fontSize = 13.sp)
+                IconButton(onClick = { finishRecording() }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Stop, contentDescription = "Stop recording", tint = MaterialTheme.colorScheme.error)
+                }
+            }
+        } else if (mode == 2) {
+            val fraction = if (voiceMs <= 0) 0f else (playMs.toFloat() / voiceMs.toFloat()).coerceIn(0f, 1f)
+            Row(pill, verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { discardVoice() }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "Discard voice message", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                }
+                IconButton(onClick = { toggleVoicePlayback() }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (playing) "Pause" else "Play voice message",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Column(Modifier.weight(1f).padding(end = 8.dp), verticalArrangement = Arrangement.Center) {
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape),
+                    )
+                    Text(
+                        "${formatElapsed(playMs / 1000)} / ${formatElapsed(voiceMs / 1000)}",
+                        modifier = Modifier.padding(top = 4.dp),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    )
+                }
+                Box(
+                    modifier = Modifier.padding(end = 2.dp).size(36.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    PressIconButton(onClick = { sendVoice() }, modifier = Modifier.size(36.dp), enabled = !uploading) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice message", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        } else Row(
+            pill,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(
@@ -454,33 +649,7 @@ fun Composer(
                     }
                 },
             )
-            if (recording) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.error)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        formatElapsed(elapsed),
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                IconButton(onClick = { finishRecording() }, modifier = Modifier.size(38.dp)) {
-                    Icon(
-                        Icons.Default.Stop,
-                        contentDescription = "Stop recording",
-                        tint = MaterialTheme.colorScheme.error,
-                    )
-                }
-            } else if (canSend) {
+            if (canSend) {
                 Box(
                     modifier = Modifier
                         .padding(end = 2.dp)
@@ -517,25 +686,61 @@ fun Composer(
                 }
             }
         }
+        }
 
         AnimatedVisibility(
             visible = panel == "emoji",
             enter = expandVertically(tween(220)) + fadeIn(tween(200)),
             exit = shrinkVertically(tween(200)) + fadeOut(tween(180)),
         ) {
-            AndroidView(
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(280.dp),
-                factory = { ctx -> EmojiPickerView(ctx) },
-                update = { view ->
-                    view.setOnEmojiPickedListener { item ->
-                        draftSink.value(draftState.value + item.emoji)
+                    .height(280.dp)
+            ) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx -> EmojiPickerView(ctx) },
+                    update = { view ->
+                        view.setOnEmojiPickedListener { item ->
+                            val chosen = EmojiPreferences.applySkinTone(item.emoji, view.context)
+                            draftSink.value(draftState.value + chosen)
+                        }
+                    },
+                )
+                Surface(
+                    onClick = {
+                        draftSink.value(deleteLastEmojiOrChar(draftState.value))
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(bottom = 12.dp, end = 12.dp)
+                        .size(42.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    shadowElevation = 4.dp,
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Backspace,
+                            contentDescription = "Delete emoji",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                },
-            )
+                }
+            }
         }
     }
+}
+
+private fun deleteLastEmojiOrChar(text: String): String {
+    if (text.isEmpty()) return ""
+    val length = text.length
+    val codePoint = text.codePointBefore(length)
+    val count = Character.charCount(codePoint)
+    return text.substring(0, length - count)
 }
 
 private class ComposerField(context: Context) : EditText(context) {

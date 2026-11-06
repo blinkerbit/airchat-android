@@ -558,14 +558,8 @@ private fun VideoSurface(
         RendererCommon.ScalingType.SCALE_ASPECT_FILL
     }
 
-    val surfaceModifier = if (shouldMirror) {
-        modifier.graphicsLayer { scaleX = -1f }
-    } else {
-        modifier
-    }
-
     AndroidView(
-        modifier = surfaceModifier,
+        modifier = modifier,
         factory = { ctx ->
             TextureViewRenderer(ctx).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)

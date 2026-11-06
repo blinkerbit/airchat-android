@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import com.aird.AppForeground
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
@@ -178,7 +179,47 @@ object ChatRepository {
                 conv.name(),
                 conv.peer.ifEmpty { conv.name() },
                 conv.preview.ifBlank { "New message" },
+                messageId = conv.updatedAt.ifEmpty { conv.id },
+                group = conv.kind == "group",
             )
+        }
+    }
+
+    private suspend fun stageNotificationMedia(context: Context, message: ChatMessage) {
+        if (message.mine || message.id.isEmpty() || (message.e2e && !message.decryptOk)) return
+        val attachment = message.attachments.firstOrNull() ?: return
+        val kind = attachment.mediaKind
+        if (!attachment.visual() && !attachment.voice() && kind != "video") return
+        if (attachment.url.isBlank()) return
+        val voice = attachment.voice()
+        val ext = when {
+            kind == "video" -> "mp4"
+            voice -> "m4a"
+            kind == "gif" -> "gif"
+            else -> "jpg"
+        }
+        val fallback = when {
+            kind == "video" -> "video/mp4"
+            voice -> "audio/mp4"
+            kind == "gif" -> "image/gif"
+            else -> "image/jpeg"
+        }
+        val dir = File(context.cacheDir, "chat-files").apply { mkdirs() }
+        val dest = File(dir, "notify-${message.id}.$ext")
+        try {
+            val mime = if (dest.isFile && dest.length() > 0L) {
+                fallback
+            } else {
+                AirdHttp.saveTo(context, attachment.url, dest) { bytes, total ->
+                    if (total > 8_000_000L || bytes > 8_000_000L) error("too large for a notification")
+                }.ifBlank { fallback }
+            }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dest)
+            ChatNotifier.attachMedia(context, message.conversationId, message.id, uri, mime)
+        } catch (err: kotlinx.coroutines.CancellationException) {
+            throw err
+        } catch (_: Exception) {
+            dest.delete()
         }
     }
 
@@ -273,6 +314,7 @@ object ChatRepository {
             return false
         }
         close()
+        ChatNotifier.cancel(context, conversationId)
         refresh(context, quiet = true)
         return true
     }
@@ -296,6 +338,7 @@ object ChatRepository {
         }
         if (_activeId.value == conversationId) close()
         _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        ChatNotifier.cancel(context, conversationId)
         return true
     }
 
@@ -505,6 +548,7 @@ object ChatRepository {
         }
         if (action == "decline") {
             close()
+            ChatNotifier.cancel(context, conversationId)
             refresh(context, quiet = true)
             return true
         }
@@ -552,8 +596,17 @@ object ChatRepository {
         val sent = deliverText(context, conversationId, body, null, optimistic = conversationId == _activeId.value)
         if (!sent) _error.value = "Reply was not sent"
         else {
-            val title = _conversations.value.firstOrNull { it.id == conversationId }?.name() ?: "Aird Chat"
-            ChatNotifier.show(context, conversationId, title, Session.username.value, body, mine = true)
+            val conv = _conversations.value.firstOrNull { it.id == conversationId }
+            val title = conv?.name() ?: "Aird Chat"
+            ChatNotifier.show(
+                context,
+                conversationId,
+                title,
+                Session.username.value,
+                body,
+                mine = true,
+                group = conv?.kind == "group",
+            )
         }
     }
 
@@ -907,6 +960,8 @@ object ChatRepository {
                         updatedAt = item.createdAt,
                     )
                     bumpUnreadIfNeeded(context, convId, item.mine)
+                    val looking = AppForeground.resumed() && convId == _activeId.value
+                    if (!item.mine && !looking) scope.launch { stageNotificationMedia(context, item) }
                     refresh(context, quiet = true)
                 }
             }
@@ -917,7 +972,9 @@ object ChatRepository {
                 val looking = AppForeground.resumed() && convId == _activeId.value
                 if (looking) return
                 val sender = data.optString("sender", "Aird")
-                val title = _conversations.value.firstOrNull { it.id == convId }?.name() ?: sender
+                val conv = _conversations.value.firstOrNull { it.id == convId }
+                val title = conv?.name() ?: sender
+                val group = conv?.kind == "group"
                 val messageId = data.optString("message_id")
                 val sealed = data.optJSONObject("e2e")
                 val files = data.optInt("attachments")
@@ -929,7 +986,7 @@ object ChatRepository {
                         sealed != null && files > 0 -> if (files == 1) "Shared a file" else "Shared $files files"
                         else -> data.optString("preview", "New message")
                     }
-                    ChatNotifier.show(context, convId, title, sender, preview, messageId = messageId)
+                    ChatNotifier.show(context, convId, title, sender, preview, messageId = messageId, group = group)
                     if (preview.isNotBlank()) {
                         touchConversation(context, convId, preview = preview, updatedAt = nowIso())
                     }

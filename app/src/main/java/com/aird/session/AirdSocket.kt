@@ -129,7 +129,9 @@ object AirdSocket {
         val available = if (screenAvailable(context)) "1" else "0"
         val ws = server.replace("https://", "wss://").replace("http://", "ws://") +
             "/ws/chat?available=$available"
-        val request = Request.Builder().url(ws).header("Origin", server).build()
+        val requestBuilder = Request.Builder().url(ws).header("Origin", server)
+        AirdHttp.attachWebViewCookies(requestBuilder, context, server)
+        val request = requestBuilder.build()
         generation += 1
         val mine = generation
         val old = socket

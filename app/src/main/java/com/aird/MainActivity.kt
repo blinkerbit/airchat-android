@@ -1,6 +1,7 @@
 package com.aird
 
 import android.Manifest
+import android.app.Activity
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -16,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.webkit.CookieManager
 import android.util.Rational
 import android.app.NotificationManager
 import androidx.activity.ComponentActivity
@@ -28,16 +30,28 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.ProvideAirdMotion
 import androidx.core.content.ContextCompat
@@ -66,6 +80,14 @@ class MainActivity : ComponentActivity() {
         getSharedPreferences("aird", MODE_PRIVATE).edit().putBoolean(KEY_NOTIFICATIONS_PROMPTED, true).apply()
         if (!granted) notificationDenied.value = true
     }
+    private val credential = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        AppLock.credentialFinished(result.resultCode == Activity.RESULT_OK)
+    }
+    private val screenOff = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) AppLock.lockIfIdle()
+        }
+    }
     private val pipActions = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -84,6 +106,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setupLockscreenFlags()
+        try {
+            val cookie = CookieManager.getInstance().getCookie(ServerStore.get(this))
+            if (!cookie.isNullOrBlank()) AppLock.arm()
+        } catch (_: Exception) {
+        }
+        ContextCompat.registerReceiver(
+            this,
+            screenOff,
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         AppForeground.install()
         ThemeStore.load(this)
         ContextCompat.registerReceiver(
@@ -109,14 +142,21 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    fun confirmDevice(intent: Intent) {
+        credential.launch(intent)
+    }
+
     override fun onDestroy() {
         unregisterReceiver(pipActions)
+        unregisterReceiver(screenOff)
+        CallProximity.set(this, false)
         super.onDestroy()
     }
 
     override fun onResume() {
         super.onResume()
         setupLockscreenFlags()
+        WindowFlags.apply(this, secureChat.value, CallController.snapshot.value, isInPictureInPictureMode)
         askPrivileges()
         com.aird.session.AirdSocket.ensureConnected()
         val call = CallController.snapshot.value
@@ -162,6 +202,7 @@ class MainActivity : ComponentActivity() {
         val call = CallController.snapshot.value
         val active = call.phase == CallPhase.Live || call.phase == CallPhase.Outgoing || call.phase == CallPhase.Joining
         if (active && !call.minimized) enterCallPip()
+        AppLock.lockIfIdle()
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
@@ -256,15 +297,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        val action = intent?.action
-        if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) {
-            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+        if (intent == null) return
+        val action = intent.action
+        if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE || action == Intent.ACTION_PROCESS_TEXT) {
+            val sharedText = when (action) {
+                Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty()
+                else -> intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            }
             val uris = mutableListOf<Uri>()
             if (action == Intent.ACTION_SEND) {
                 @Suppress("DEPRECATION")
                 val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
                 if (uri != null) uris.add(uri)
-            } else {
+            } else if (action == Intent.ACTION_SEND_MULTIPLE) {
                 @Suppress("DEPRECATION")
                 val list = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
                 if (list != null) uris.addAll(list.filterNotNull())
@@ -272,6 +317,12 @@ class MainActivity : ComponentActivity() {
             if (sharedText.isNotEmpty() || uris.isNotEmpty()) {
                 sharedContent.value = SharedContent(text = sharedText, uris = uris)
             }
+        }
+        if (action == ACTION_OPEN_SEARCH) openSearch.value = true
+        val link = intent?.data
+        if (action == Intent.ACTION_VIEW && link?.scheme == "aird" && link.host == "chat") {
+            val id = link.lastPathSegment.orEmpty()
+            if (id.isNotEmpty()) ChatRepository.requestOpen(id)
         }
         when (intent?.getStringExtra("action")) {
             "open_chat" -> ChatRepository.requestOpen(intent.getStringExtra("conversation_id").orEmpty())
@@ -311,8 +362,34 @@ class MainActivity : ComponentActivity() {
         val inPip = MutableStateFlow(false)
         val sharedContent = MutableStateFlow<SharedContent?>(null)
         val notificationDenied = MutableStateFlow(false)
+        val secureChat = MutableStateFlow(false)
+        val openSearch = MutableStateFlow(false)
+        const val ACTION_OPEN_SEARCH = "com.aird.OPEN_SEARCH"
         private const val KEY_NOTIFICATIONS_PROMPTED = "notifications_prompted"
         private var notificationRequestSent = false
+    }
+}
+
+@Composable
+private fun AppLockGate() {
+    val activity = androidx.compose.ui.platform.LocalContext.current as Activity
+    var nonce by remember { mutableIntStateOf(0) }
+    DisposableEffect(Unit) {
+        onDispose { AppLock.dismissPrompt() }
+    }
+    LaunchedEffect(nonce) {
+        AppLock.dismissPrompt()
+        AppLock.request(activity)
+    }
+    Box(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Aird is locked", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = { nonce++ }) { Text("Unlock") }
+        }
     }
 }
 
@@ -327,6 +404,8 @@ private fun AirdRoot() {
     val backgroundOnly by CallController.backgroundOnly.collectAsState()
     val closePip by CallController.pipClose.collectAsState()
     val micNeeded by CallController.micNeeded.collectAsState()
+    val locked by AppLock.locked.collectAsState()
+    val secureChat by MainActivity.secureChat.collectAsState()
     val micPrompt = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         CallController.microphoneAnswered(context, granted)
     }
@@ -343,7 +422,14 @@ private fun AirdRoot() {
             activity.updatePipParams()
         }
     }
-    LaunchedEffect(Unit) { Session.probe(context) }
+    LaunchedEffect(Unit) {
+        val restored = Session.probe(context)
+        if (restored) AppLock.onSignedIn() else AppLock.disarm()
+    }
+    LaunchedEffect(secureChat, call.phase, call.mode, call.speaker, call.output, pip) {
+        val activity = context as? Activity ?: return@LaunchedEffect
+        WindowFlags.apply(activity, secureChat, call, pip)
+    }
     LaunchedEffect(signedIn) {
         if (!signedIn) return@LaunchedEffect
         AirdConnectionService.start(context)
@@ -357,6 +443,7 @@ private fun AirdRoot() {
             val appear = if (reduced || call.phase == CallPhase.Incoming) EnterTransition.None else fadeIn(tween(220))
             Box(Modifier.fillMaxSize()) {
                 if (signedIn) ChatHome() else LoginScreen(onSignedIn = {})
+                if (locked && signedIn && call.phase == CallPhase.Idle && !pip) AppLockGate()
                 val outcome = call.phase == CallPhase.Idle && call.status.isNotEmpty()
                 val showCall = outcome || pip || (call.phase != CallPhase.Idle && !call.minimized)
                 val showBubble = call.minimized && call.mode == "video" && call.phase != CallPhase.Idle && !pip && !backgroundOnly

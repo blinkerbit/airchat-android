@@ -163,6 +163,7 @@ class AirdConnectionService : Service() {
         // Clean up legacy channels if present
         try {
             manager.deleteNotificationChannel("aird_chat_messages")
+            manager.deleteNotificationChannel("aird_chat_messages_v2")
             manager.deleteNotificationChannel("aird_chat_calls")
             manager.deleteNotificationChannel("aird_chat_calls_v2")
         } catch (_: Exception) {}
@@ -172,7 +173,7 @@ class AirdConnectionService : Service() {
                 description = "Chat message alerts"
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 250, 250, 250)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             },
         )
         manager.createNotificationChannel(
@@ -361,7 +362,7 @@ class AirdConnectionService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "aird_chat_messages_v2"
+        const val CHANNEL_ID = "aird_chat_messages_v3"
         const val CALL_CHANNEL_ID = "aird_chat_calls_v3"
         const val SERVICE_CHANNEL_ID = "aird_chat_connection"
         private const val EXTRA_MODE = "mode"

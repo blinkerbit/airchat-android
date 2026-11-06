@@ -49,6 +49,7 @@ object Session {
         CookieManager.getInstance().flush()
         UnreadBadge.apply(context, 0)
         ChatNotifier.forget(context)
+        com.aird.AppLock.onSignedOut()
         ChatRepository.clear()
         ChatE2E.clear()
         AirdSocket.stop()

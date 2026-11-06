@@ -9,4 +9,6 @@
     <string name="server_change_body">This leaves the current Aird session on this phone.</string>
     <string name="server_change_confirm">Change</string>
     <string name="server_change_stay">Stay</string>
+    <string name="shortcut_search">Search</string>
+    <string name="shortcut_search_long">Search conversations</string>
 </resources>

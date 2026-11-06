@@ -40,3 +40,4 @@ captures/
 # External native build folder
 .cxx/
 build/
+.kotlin
