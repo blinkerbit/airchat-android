@@ -17,6 +17,17 @@ object EmojiPreferences {
         SkinOption("dark", "Dark", "🖐🏿", "\uD83C\uDFFF"),
     )
 
+    private const val EMOJI_PICKER_PREFS = "androidx.emoji2.emojipicker.preferences"
+    private const val STICKY_KEY = "pref_key_sticky_variant"
+
+    private val baseHumanEmojis = listOf(
+        "🖐", "👍", "👎", "👊", "✊", "🤛", "🤜", "👏", "🙌", "👐", "🤲", "🤝", "🙏",
+        "✌️", "🤟", "🤘", "🤙", "👈", "👉", "👆", "🖕", "👇", "☝️", "✍️", "💅", "🤳",
+        "💪", "🦵", "🦶", "👂", "🦻", "👃", "👶", "🧒", "👦", "👧", "🧑", "👨", "👩",
+        "👴", "👵", "👮", "👷", "💂", "🕵", "🤶", "🧑‍🎄", "🎅", "🙅", "🙆", "🙇", "🙋",
+        "🙌", "💆", "💇", "🚶", "🧍", "🧎", "🏃", "💃", "🕺", "🧖", "🧗", "🛌", "🛀"
+    )
+
     fun getSkinTone(context: Context): String {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SKIN_TONE, "default") ?: "default"
@@ -27,6 +38,33 @@ object EmojiPreferences {
             .edit()
             .putString(KEY_SKIN_TONE, skinTone)
             .apply()
+        syncPickerPreferences(context, skinTone)
+    }
+
+    private fun syncPickerPreferences(context: Context, skinTone: String) {
+        val pickerPrefs = context.getSharedPreferences(EMOJI_PICKER_PREFS, Context.MODE_PRIVATE)
+        val targetOption = allSkins.firstOrNull { it.id == skinTone } ?: return
+        val modifier = targetOption.modifier
+
+        val currentStr = pickerPrefs.getString(STICKY_KEY, "") ?: ""
+        val map = currentStr.split("|")
+            .mapNotNull { entry ->
+                val parts = entry.split("=", limit = 2)
+                if (parts.size == 2) parts[0] to parts[1] else null
+            }
+            .toMap()
+            .toMutableMap()
+
+        baseHumanEmojis.forEach { base ->
+            if (modifier.isEmpty()) {
+                map.remove(base)
+            } else {
+                map[base] = "$base$modifier"
+            }
+        }
+
+        val updatedStr = map.entries.joinToString("|") { "${it.key}=${it.value}" }
+        pickerPrefs.edit().putString(STICKY_KEY, updatedStr).apply()
     }
 
     fun applySkinTone(emoji: String, context: Context): String {
