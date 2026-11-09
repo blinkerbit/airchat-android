@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -14,6 +15,8 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import java.io.InputStream
 import org.json.JSONObject
 import java.io.File
 import java.net.URLDecoder
@@ -43,6 +46,84 @@ object AirdHttp {
 
     suspend fun send(context: Context, path: String, method: String, body: JSONObject): AirdResponse =
         request(context, path, method, body)
+
+    suspend fun postForm(context: Context, path: String, fields: Map<String, String>): AirdResponse =
+        withContext(Dispatchers.IO) {
+            CookieManager.getInstance().flush()
+            val token = xsrf(ServerStore.get(context))
+            val form = FormBody.Builder()
+            if (token.isNotEmpty()) form.add("_xsrf", token)
+            fields.forEach { (key, value) -> form.add(key, value) }
+            val builder = Request.Builder()
+                .url(absolute(context, path))
+                .header("Accept", "application/json")
+                .header("Cache-Control", "no-cache")
+                .header("Origin", ServerStore.get(context))
+            if (token.isNotEmpty()) builder.header("X-XSRFToken", token)
+            builder.post(form.build())
+            client.newCall(builder.build()).execute().use { response ->
+                AirdResponse(response.code, response.body.string())
+            }
+        }
+
+    suspend fun postStream(
+        context: Context,
+        path: String,
+        length: Long,
+        headers: Map<String, String>,
+        open: () -> InputStream,
+        onProgress: (Long) -> Unit,
+        cancelled: () -> Boolean,
+    ): AirdResponse = withContext(Dispatchers.IO) {
+        sendBody(
+            context,
+            path,
+            "POST",
+            StreamBody(length, open, onProgress, cancelled),
+            headers,
+            cancelled,
+        )
+    }
+
+    suspend fun putBytes(
+        context: Context,
+        path: String,
+        bytes: ByteArray,
+        headers: Map<String, String>,
+        cancelled: () -> Boolean,
+    ): AirdResponse = withContext(Dispatchers.IO) {
+        sendBody(
+            context,
+            path,
+            "PUT",
+            bytes.toRequestBody("application/octet-stream".toMediaType()),
+            headers,
+            cancelled,
+        )
+    }
+
+    private fun sendBody(
+        context: Context,
+        path: String,
+        method: String,
+        body: RequestBody,
+        headers: Map<String, String>,
+        cancelled: () -> Boolean,
+    ): AirdResponse {
+        if (cancelled()) return AirdResponse(0, "cancelled")
+        CookieManager.getInstance().flush()
+        val builder = Request.Builder()
+            .url(absolute(context, path))
+            .header("Accept", "application/json")
+            .header("Origin", ServerStore.get(context))
+        headers.forEach { (key, value) -> builder.header(key, value) }
+        val token = xsrf(ServerStore.get(context))
+        if (token.isNotEmpty()) builder.header("X-XSRFToken", token)
+        builder.method(method, body)
+        return uploadClient.newCall(builder.build()).execute().use { response ->
+            AirdResponse(response.code, response.body.string())
+        }
+    }
 
     suspend fun postRaw(context: Context, path: String, file: File, headers: Map<String, String>): AirdResponse =
         withContext(Dispatchers.IO) {
@@ -155,6 +236,30 @@ object AirdHttp {
         val raw = CookieManager.getInstance().getCookie(server) ?: return ""
         val match = Regex("(?:^|; )_xsrf=([^;]*)").find(raw) ?: return ""
         return URLDecoder.decode(match.groupValues[1], "UTF-8").trim().trim('"')
+    }
+}
+
+private class StreamBody(
+    private val length: Long,
+    private val open: () -> InputStream,
+    private val onProgress: (Long) -> Unit,
+    private val cancelled: () -> Boolean,
+) : RequestBody() {
+    override fun contentType() = "application/octet-stream".toMediaType()
+    override fun contentLength() = length
+    override fun writeTo(sink: BufferedSink) {
+        open().use { input ->
+            val buf = ByteArray(64 * 1024)
+            var sent = 0L
+            while (true) {
+                if (cancelled()) throw java.io.IOException("cancelled")
+                val n = input.read(buf)
+                if (n < 0) break
+                sink.write(buf, 0, n)
+                sent += n
+                onProgress(sent)
+            }
+        }
     }
 }
 

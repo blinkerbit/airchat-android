@@ -17,6 +17,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -63,6 +65,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -277,6 +280,12 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                 },
                 actions = {
                     if (active.isEmpty()) {
+                        IconButton(onClick = {
+                            filePath = ""
+                            files = true
+                        }) {
+                            Icon(Icons.Outlined.Description, contentDescription = "Files")
+                        }
                         IconButton(onClick = { searchActive = !searchActive; if (!searchActive) searchQuery = "" }) {
                             Icon(Icons.Default.Search, contentDescription = "Search")
                         }
@@ -528,7 +537,14 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
             ShareToAirdSheet(shared = sharedContent, model = model, onDismiss = { MainActivity.sharedContent.value = null })
         }
     }
-    if (files) AirdFilesScreen(startPath = filePath, onBack = { files = false })
+    val filesMotion = LocalAirdReducedMotion.current
+    AnimatedVisibility(
+        visible = files,
+        enter = if (filesMotion) fadeIn(tween(120)) else slideInHorizontally(tween(280)) { it } + fadeIn(tween(180)),
+        exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
+    ) {
+        AirdFilesScreen(startPath = filePath, onBack = { files = false })
+    }
     if (search) {
         AirdSuperSearchScreen(
             startPath = "",
