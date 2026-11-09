@@ -829,10 +829,9 @@ private fun FilesBar(
         placing != null -> "place"
         picking -> "pick"
         selectedCount > 0 -> "select"
-        tagging -> "upload"
-        !managing -> "none"
-        else -> "browse"
+        else -> "none"
     }
+    if (mode == "none") return
     AnimatedContent(
         targetState = mode,
         transitionSpec = {
@@ -865,23 +864,6 @@ private fun FilesBar(
                     IconButton(onClick = onTag, enabled = !busy) { Icon(Icons.AutoMirrored.Outlined.Label, contentDescription = "Tag") }
                     IconButton(onClick = onShare, enabled = !busy) { Icon(Icons.Outlined.Share, contentDescription = "Share in chat") }
                     IconButton(onClick = onDelete, enabled = !busy) { Icon(Icons.Outlined.Delete, contentDescription = "Delete") }
-                }
-                "upload", "browse" -> {
-                    if (current == "upload") {
-                        TextButton(onClick = onUpload, enabled = !busy) {
-                            Icon(Icons.Outlined.FileUpload, contentDescription = null)
-                            Text("Upload", modifier = Modifier.padding(start = 6.dp))
-                        }
-                    } else {
-                    TextButton(onClick = onNewFolder, enabled = !busy) {
-                        Icon(Icons.Default.CreateNewFolder, contentDescription = null)
-                        Text("Folder", modifier = Modifier.padding(start = 6.dp))
-                    }
-                    TextButton(onClick = onUpload, enabled = !busy) {
-                        Icon(Icons.Outlined.FileUpload, contentDescription = null)
-                        Text("Upload", modifier = Modifier.padding(start = 6.dp))
-                    }
-                    }
                 }
             }
         }

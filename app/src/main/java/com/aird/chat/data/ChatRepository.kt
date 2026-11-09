@@ -752,6 +752,7 @@ object ChatRepository {
             return null
         }
         if (!response.ok) return null
+        val catalog = tagCatalog(context)
         val files = response.json().optJSONArray("files") ?: return emptyList()
         return buildList {
             for (i in 0 until files.length()) {
@@ -759,7 +760,15 @@ object ChatRepository {
                 val name = item.optString("name")
                 if (name.isEmpty()) continue
                 val child = if (clean.isEmpty()) name else "$clean/$name"
-                add(item.toEntry(name, child))
+                var entry = item.toEntry(name, child)
+                val catalogTags = catalog.tags.filter { t ->
+                    t.files.any { f -> f.trim().trim('/') == child }
+                }.map { it.name }
+                if (catalogTags.isNotEmpty()) {
+                    val merged = (entry.tags + catalogTags).distinct()
+                    entry = entry.copy(tags = merged)
+                }
+                add(entry)
             }
         }
     }

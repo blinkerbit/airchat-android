@@ -116,11 +116,11 @@ data class ListArtifact(
     override val participants: List<String>,
     val title: String,
     val style: String,
-    val notes: String = "",
-    val groupId: String = "",
     val items: List<ListEntry>,
     val done: Int,
     val total: Int,
+    val notes: String = "",
+    val groupId: String = "",
     override val active: Boolean = true,
 ) : CollabArtifact() {
     override val heading: String get() = title

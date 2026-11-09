@@ -326,6 +326,7 @@ class MainActivity : ComponentActivity() {
         }
         when (intent?.getStringExtra("action")) {
             "open_chat" -> ChatRepository.requestOpen(intent.getStringExtra("conversation_id").orEmpty())
+            "open_lists" -> openLists.value = true
             "accept_call" -> {
                 CallController.restoreIncoming(
                     intent.getStringExtra("conversation_id").orEmpty(),
@@ -364,6 +365,7 @@ class MainActivity : ComponentActivity() {
         val notificationDenied = MutableStateFlow(false)
         val secureChat = MutableStateFlow(false)
         val openSearch = MutableStateFlow(false)
+        val openLists = MutableStateFlow(false)
         const val ACTION_OPEN_SEARCH = "com.aird.OPEN_SEARCH"
         private const val KEY_NOTIFICATIONS_PROMPTED = "notifications_prompted"
         private var notificationRequestSent = false

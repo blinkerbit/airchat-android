@@ -339,6 +339,11 @@ private fun ListBody(
                     textDecoration = if (item.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
                     modifier = if (expanded) Modifier.clickable { editing = item } else Modifier,
                 )
+                val extra = listOf(item.dueAt.take(16).replace('T', ' '), item.notes.lineSequence().firstOrNull().orEmpty())
+                    .filter { it.isNotBlank() }
+                if (extra.isNotEmpty()) {
+                    Text(extra.joinToString(" · "), color = fg.copy(alpha = 0.65f), fontSize = 11.sp, maxLines = 2)
+                }
                 if (item.labels.isNotEmpty()) {
                     Text(item.labels.joinToString(" · "), color = fg.copy(alpha = 0.65f), fontSize = 11.sp)
                 }

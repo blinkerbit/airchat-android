@@ -59,10 +59,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Poll
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Description
@@ -161,6 +163,8 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     var groupInfo by remember { mutableStateOf(false) }
     var confirmDeleteChat by remember { mutableStateOf(false) }
     var files by remember { mutableStateOf(false) }
+    var lists by remember { mutableStateOf(false) }
+    var polls by remember { mutableStateOf(false) }
     var filePath by remember { mutableStateOf("") }
     var search by remember { mutableStateOf(false) }
     var shared by remember { mutableStateOf(false) }
@@ -170,9 +174,10 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     val themeId by ThemeStore.id.collectAsState()
     val locked by AppLock.locked.collectAsState()
     val wantSearch by MainActivity.openSearch.collectAsState()
+    val wantLists by MainActivity.openLists.collectAsState()
     val openChat = conversations.firstOrNull { it.id == active }
     val wide = LocalConfiguration.current.screenWidthDp >= 720
-    val overlay = files || search || shared || keys || enhanced || settings
+    val overlay = files || lists || polls || search || shared || keys || enhanced || settings
 
     LaunchedEffect(Unit) { model.refresh() }
     DisposableEffect(Unit) {
@@ -187,6 +192,13 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         val id = pending
         ChatRepository.consumePending()
         model.open(id)
+    }
+    LaunchedEffect(wantLists, locked) {
+        if (!wantLists || locked) return@LaunchedEffect
+        MainActivity.openLists.value = false
+        files = false
+        polls = false
+        lists = true
     }
     LaunchedEffect(wantSearch, locked, wide) {
         if (!wantSearch || locked) return@LaunchedEffect
@@ -281,6 +293,22 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                 actions = {
                     if (active.isEmpty()) {
                         IconButton(onClick = {
+                            files = false
+                            polls = false
+                            lists = true
+                        }) {
+                            Icon(Icons.Default.Checklist, contentDescription = "Lists")
+                        }
+                        IconButton(onClick = {
+                            files = false
+                            lists = false
+                            polls = true
+                        }) {
+                            Icon(Icons.Default.Poll, contentDescription = "Polls")
+                        }
+                        IconButton(onClick = {
+                            lists = false
+                            polls = false
                             filePath = ""
                             files = true
                         }) {
@@ -290,9 +318,6 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                             Icon(Icons.Default.Search, contentDescription = "Search")
                         }
                         IconButton(onClick = { sheet = true }) { Icon(Icons.Default.Add, contentDescription = "New chat") }
-                        IconButton(onClick = { themeMenu = true }) {
-                            Icon(Icons.Default.Palette, contentDescription = "Theme")
-                        }
                         DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }) {
                             AirdPalettes.all.forEach { palette ->
                                 DropdownMenuItem(
@@ -307,9 +332,36 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Menu") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(
+                                text = { Text("Lists") },
+                                onClick = {
+                                    menu = false
+                                    files = false
+                                    polls = false
+                                    lists = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Polls") },
+                                onClick = {
+                                    menu = false
+                                    files = false
+                                    lists = false
+                                    polls = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Theme") },
+                                onClick = {
+                                    menu = false
+                                    themeMenu = true
+                                },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Files") },
                                 onClick = {
                                     menu = false
+                                    lists = false
+                                    polls = false
                                     filePath = ""
                                     files = true
                                 },
@@ -544,6 +596,20 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
     ) {
         AirdFilesScreen(startPath = filePath, onBack = { files = false })
+    }
+    AnimatedVisibility(
+        visible = lists,
+        enter = if (filesMotion) fadeIn(tween(120)) else slideInHorizontally(tween(280)) { it } + fadeIn(tween(180)),
+        exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
+    ) {
+        AirdListsScreen(onBack = { lists = false })
+    }
+    AnimatedVisibility(
+        visible = polls,
+        enter = if (filesMotion) fadeIn(tween(120)) else slideInHorizontally(tween(280)) { it } + fadeIn(tween(180)),
+        exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
+    ) {
+        AirdPollsScreen(onBack = { polls = false })
     }
     if (search) {
         AirdSuperSearchScreen(
