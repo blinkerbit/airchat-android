@@ -4,6 +4,7 @@ import android.content.Context
 import com.aird.chat.model.CollabArtifact
 import com.aird.chat.model.CollabFocus
 import com.aird.chat.model.CollabRef
+import com.aird.chat.model.CollabTag
 import com.aird.chat.model.ListArtifact
 import com.aird.chat.model.ListDraft
 import com.aird.chat.model.ListEntry
@@ -22,7 +23,10 @@ import com.aird.chat.model.stampStillOpen
 import com.aird.session.AirdHttp
 import com.aird.session.AirdResponse
 import com.aird.session.Session
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
@@ -48,6 +52,11 @@ object CollabRepository {
     private val _shelfFor = MutableStateFlow("")
     val shelfFor: StateFlow<String> = _shelfFor
     private val _focus = MutableStateFlow<CollabFocus?>(null)
+    private val _live = MutableSharedFlow<Pair<String, String>>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val live: SharedFlow<Pair<String, String>> = _live
     val focus: StateFlow<CollabFocus?> = _focus
     private val slotLock = Any()
     private val shelfGen = AtomicInteger()
@@ -139,6 +148,7 @@ object CollabRepository {
         val kind = data.optString("kind")
         val id = data.optString("id")
         if (kind.isBlank() || id.isBlank()) return
+        _live.tryEmit(kind to id)
         val here = ChatRepository.activeId.value
         val convs = data.optJSONArray("conversation_ids")
         var hereToo = false
@@ -179,8 +189,10 @@ object CollabRepository {
                     groupId = item.optString("group_id"),
                     done = progress?.optInt("done") ?: 0,
                     total = progress?.optInt("total") ?: 0,
-                    nextDue = item.optString("next_due"),
+                    nextDue = item.optCleanString("next_due"),
                     active = item.flag("active") ?: true,
+                    organizer = item.optString("organizer"),
+                    tags = collabTags(item.optJSONArray("tags")),
                 )
             },
             groups = jsonArray(body.optJSONArray("groups")).mapNotNull { item ->
@@ -226,6 +238,18 @@ object CollabRepository {
         if (!response.ok) throw CollabException(response.json().optString("error", "Could not remove the group"))
     }
 
+    suspend fun renameGroup(context: Context, groupId: String, name: String) {
+        val clean = name.trim()
+        if (clean.isEmpty()) throw CollabException("Add a group name.")
+        val response = AirdHttp.send(
+            context,
+            "/api/list-groups/$groupId",
+            "PATCH",
+            JSONObject().put("name", clean.take(80)),
+        )
+        if (!response.ok) throw CollabException(response.json().optString("error", "Could not rename the group"))
+    }
+
     suspend fun placeList(context: Context, listId: String, groupId: String) {
         val response = AirdHttp.send(
             context,
@@ -259,6 +283,38 @@ object CollabRepository {
                 add(item)
             }
         }
+    }
+
+    suspend fun createBoardPoll(context: Context, draft: PollDraft): String {
+        val options = draft.options.map { it.trim() }.filter { it.isNotEmpty() }.take(12)
+        if (draft.question.trim().isEmpty()) throw CollabException("Add a question.")
+        if (options.size < 2) throw CollabException("Add at least two options.")
+        val body = JSONObject()
+            .put("question", draft.question.trim().take(400))
+            .put("options", JSONArray(options))
+            .put("allow_multi", draft.allowMulti)
+        access(body, draft.privateShare, emptyList(), clearPublic = false)
+        return createdId(context, "/api/polls", body)
+    }
+
+    suspend fun createBoardList(context: Context, draft: ListDraft): String {
+        if (draft.title.trim().isEmpty()) throw CollabException("Add a title.")
+        val body = JSONObject()
+            .put("title", draft.title.trim().take(300))
+            .put("kind", if (draft.style == "bullet") "bullet" else "todo")
+            .put("items", JSONArray())
+        if (draft.notes.isNotBlank()) body.put("notes", draft.notes.trim().take(4000))
+        if (draft.groupId.isNotBlank()) body.put("group_id", draft.groupId)
+        access(body, draft.privateShare, emptyList(), clearPublic = false)
+        return createdId(context, "/api/lists", body)
+    }
+
+    private suspend fun createdId(context: Context, path: String, body: JSONObject): String {
+        val created = AirdHttp.send(context, path, "POST", body)
+        if (!created.ok) throw CollabException(nice(created))
+        val id = created.json().optString("id")
+        if (id.isBlank()) throw CollabException("Could not create")
+        return id
     }
 
     suspend fun createPoll(context: Context, draft: PollDraft): String {
@@ -608,9 +664,9 @@ object CollabRepository {
                         item.optString("text"),
                         item.bool("done"),
                         strings(item.optJSONArray("labels")),
-                        item.optString("notes"),
-                        item.optString("due_at"),
-                        item.optString("remind_at"),
+                        item.optCleanString("notes"),
+                        item.optCleanString("due_at"),
+                        item.optCleanString("remind_at"),
                     ),
                 )
             }
@@ -633,6 +689,7 @@ object CollabRepository {
             items = items,
             done = done,
             total = total,
+            tags = collabTags(json.optJSONArray("tags")),
             active = json.flag("active") ?: !finished,
         )
     }
@@ -652,6 +709,23 @@ object CollabRepository {
             joinPath = json.optString("join_path").ifBlank { if (slug.isBlank()) "" else "/meet/$slug" },
             active = json.flag("active") ?: live,
         )
+    }
+
+    private fun collabTags(array: JSONArray?): List<CollabTag> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i)
+                if (obj != null) {
+                    val name = obj.optString("name").ifBlank { obj.optString("display_name") }
+                    if (name.isBlank()) continue
+                    add(CollabTag(name, obj.optString("color"), obj.optString("display_name").ifBlank { name }))
+                } else {
+                    val name = array.optString(i)
+                    if (name.isNotBlank()) add(CollabTag(name, "", name))
+                }
+            }
+        }
     }
 
     private fun strings(array: JSONArray?): List<String> {
@@ -690,4 +764,10 @@ object CollabRepository {
         "meet" -> "meeting"
         else -> "list"
     }
+}
+
+private fun JSONObject.optCleanString(key: String): String {
+    if (isNull(key)) return ""
+    val value = optString(key).trim()
+    return if (value.equals("null", ignoreCase = true)) "" else value
 }

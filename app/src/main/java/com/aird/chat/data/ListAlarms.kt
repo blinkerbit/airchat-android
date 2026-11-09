@@ -22,23 +22,18 @@ object ListAlarms {
         val kept = mutableSetOf<String>()
         val now = System.currentTimeMillis()
         next.forEach { reminder ->
-            val whenMs = try {
-                Instant.parse(reminder.remindAt).toEpochMilli()
-            } catch (_: Exception) {
-                return@forEach
-            }
-            if (whenMs <= now) return@forEach
-            val id = reminder.itemId
             try {
+                val whenMs = Instant.parse(reminder.remindAt).toEpochMilli()
+                if (whenMs <= now) return@forEach
+                val id = reminder.itemId
                 alarms.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     whenMs,
                     pending(app, id, reminder.title, reminder.text),
                 )
-            } catch (_: SecurityException) {
-                return@forEach
+                kept.add(id)
+            } catch (_: Exception) {
             }
-            kept.add(id)
         }
         prefs.edit().putStringSet(KEY, kept).apply()
     }

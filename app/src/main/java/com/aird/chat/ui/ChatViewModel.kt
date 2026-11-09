@@ -73,6 +73,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { ChatRepository.saveCopy(getApplication(), message, attachment, destDir) }
     }
 
+    fun saveCopies(message: ChatMessage, attachments: List<ChatAttachment>, destDir: String) {
+        viewModelScope.launch {
+            attachments.forEach { ChatRepository.saveCopy(getApplication(), message, it, destDir) }
+        }
+    }
+
     fun attachBytes(name: String, mime: String, bytes: ByteArray, caption: String, replyToId: String?) {
         viewModelScope.launch { ChatRepository.attachBytes(getApplication(), name, mime, bytes, caption, replyToId) }
     }

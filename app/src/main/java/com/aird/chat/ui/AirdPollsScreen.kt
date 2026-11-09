@@ -40,6 +40,7 @@ import com.aird.chat.data.CollabRepository
 import com.aird.chat.model.PollArtifact
 import com.aird.chat.model.PollDraft
 import com.aird.chat.model.PollSummary
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -59,10 +60,25 @@ fun AirdPollsScreen(onBack: () -> Unit) {
     fun reload() {
         scope.launch {
             try {
-                polls = CollabRepository.pollBoard(context)
+                polls = CollabRepository.pollBoard(context).distinctBy { it.id }
                 error = ""
+            } catch (err: CancellationException) {
+                throw err
             } catch (err: Exception) {
                 error = err.message ?: "Could not load polls"
+            }
+        }
+    }
+
+    fun work(block: suspend () -> Unit) {
+        scope.launch {
+            try {
+                block()
+                error = ""
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                error = err.message ?: "Could not save"
             }
         }
     }
@@ -120,7 +136,7 @@ fun AirdPollsScreen(onBack: () -> Unit) {
                                 if (poll.allowMulti) {
                                     picked = if (option.id in picked) picked - option.id else picked + option.id
                                 } else {
-                                    scope.launch {
+                                    work {
                                         CollabRepository.vote(context, poll, listOf(option.id))
                                         reload()
                                     }
@@ -143,7 +159,7 @@ fun AirdPollsScreen(onBack: () -> Unit) {
                     }
                     if (poll.allowMulti && poll.active) {
                         TextButton(onClick = {
-                            scope.launch {
+                            work {
                                 CollabRepository.vote(context, poll, picked.toList())
                                 reload()
                             }
@@ -154,10 +170,11 @@ fun AirdPollsScreen(onBack: () -> Unit) {
         }
     }
     if (creating) PollCreateDialog(onDismiss = { creating = false }) { question, options, multi ->
-        scope.launch {
-            CollabRepository.createPoll(context, PollDraft(question, options, multi, false))
+        work {
+            val id = CollabRepository.createBoardPoll(context, PollDraft(question, options, multi, false))
             creating = false
             reload()
+            openId = id
         }
     }
     if (share && detail != null) ShareCollabDialog("poll", detail!!.id, onDismiss = { share = false })

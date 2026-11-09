@@ -8,8 +8,11 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -217,7 +220,7 @@ fun MessageRow(
     onDelete: () -> Unit,
     onReact: (String) -> Unit,
     onPin: () -> Unit,
-    onSave: (ChatAttachment) -> Unit,
+    onSave: (List<ChatAttachment>) -> Unit,
     onRetry: () -> Unit,
     pinned: Boolean,
     enter: Boolean = false,
@@ -431,35 +434,41 @@ fun MessageRow(
                             menu = false
                             if (onStartSelect != null) onStartSelect() else confirmDelete = true
                         }
-                        if (message.attachments.isNotEmpty()) {
-                            message.attachments.forEach { attachment ->
-                                val suffix = if (message.attachments.size > 1) " ${attachment.name}" else ""
-                                SheetAction("Download$suffix") {
-                                    menu = false
-                                    scope.launch { downloadChatAttachment(context, message.id, attachment) }
-                                }
-                                SheetAction("Save to device$suffix") {
-                                    menu = false
-                                    scope.launch { saveChatAttachmentToDevice(context, message.id, attachment) }
-                                }
-                                SheetAction("Open$suffix") {
-                                    menu = false
-                                    scope.launch { openChatAttachment(context, message.id, attachment) }
-                                }
-                                if (!message.e2e || message.decryptOk) {
-                                    SheetAction("Share$suffix") {
-                                        menu = false
-                                        scope.launch { shareChatAttachment(context, message.id, attachment) }
-                                    }
-                                }
-                                if (attachment.shareUrl.isNotBlank()) {
-                                    SheetAction("Open in Aird") {
-                                        menu = false
-                                        openAirdShareInBrowser(context, attachment.shareUrl)
-                                    }
-                                }
-                                SheetAction("Save to Aird$suffix") { menu = false; onSave(attachment) }
+                        if (message.attachments.size > 1) {
+                            MultiFileActions(
+                                messageId = message.id,
+                                files = message.attachments,
+                                canShare = !message.e2e || message.decryptOk,
+                                onSave = { chosen -> menu = false; onSave(chosen) },
+                                onClose = { menu = false },
+                            )
+                        } else if (message.attachments.isNotEmpty()) {
+                            val attachment = message.attachments.first()
+                            SheetAction("Save in app") {
+                                menu = false
+                                scope.launch { downloadChatAttachment(context, message.id, attachment) }
                             }
+                            SheetAction("Save to device") {
+                                menu = false
+                                scope.launch { saveChatAttachmentToDevice(context, message.id, attachment) }
+                            }
+                            SheetAction("Open") {
+                                menu = false
+                                scope.launch { openChatAttachment(context, message.id, attachment) }
+                            }
+                            if (!message.e2e || message.decryptOk) {
+                                SheetAction("Share") {
+                                    menu = false
+                                    scope.launch { shareChatAttachment(context, message.id, attachment) }
+                                }
+                            }
+                            if (attachment.shareUrl.isNotBlank()) {
+                                SheetAction("Open in Aird") {
+                                    menu = false
+                                    openAirdShareInBrowser(context, attachment.shareUrl)
+                                }
+                            }
+                            SheetAction("Save to Aird") { menu = false; onSave(listOf(attachment)) }
                         }
                         SheetAction(if (pinned) "Unpin" else "Pin") { menu = false; onPin() }
                         }
@@ -622,58 +631,8 @@ private fun Bubble(
             )
         }
 
-        message.attachments.forEach { attachment ->
-            val voice = attachment.voice() && attachment.url.isNotBlank()
-            val playable = !voice && attachment.playsInline() && attachment.url.isNotBlank()
-            val gestures = Modifier.pointerInput(message.id, attachment.url, playable, voice) {
-                detectTapGestures(
-                    onTap = {
-                        when {
-                            voice -> Unit
-                            attachment.visual() || attachment.video() -> onOpen(attachment)
-                            playable -> ChatPlayback.play(
-                                context,
-                                attachment.url,
-                                attachment.name.ifBlank { "Audio" },
-                            )
-                            else -> onFile(attachment)
-                        }
-                    },
-                )
-            }
-            Column(Modifier.fillMaxWidth()) {
-                when {
-                    attachment.visual() -> {
-                        AttachmentImage(
-                            attachment,
-                            Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)).then(gestures),
-                        )
-                    }
-                    voice -> {
-                        VoiceNoteBubble(
-                            messageId = message.id,
-                            attachment = attachment,
-                            fg = fg,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                        )
-                    }
-                    else -> {
-                        Column(modifier = gestures.padding(vertical = 4.dp)) {
-                            Text(
-                                "📎 ${attachment.name}",
-                                color = fg,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                if (playable) "Tap to play" else "Tap to download",
-                                color = fg.copy(alpha = 0.7f),
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
-                }
-                AttachmentProgressBar(message.id, attachment.index, fg)
-            }
+        if (message.attachments.isNotEmpty()) {
+            AttachmentStack(message, fg, onOpen, onFile)
         }
         if (message.cardId.isNotBlank()) {
             CollabInline(message.cardKind.ifBlank { "poll" }, message.cardId, "", message.cardTitle, mine)
@@ -705,6 +664,205 @@ private fun Bubble(
             }
         } else if (shownBody.isNotBlank() && shownBody != "Encrypted message") {
             MessageBodyText(shownBody, fg, mine)
+        }
+    }
+}
+
+@Composable
+private fun AttachmentStack(
+    message: ChatMessage,
+    fg: Color,
+    onOpen: (ChatAttachment) -> Unit,
+    onFile: (ChatAttachment) -> Unit,
+) {
+    val context = LocalContext.current
+    val many = message.attachments.size > 1
+    val scroll = message.attachments.size > 3
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(if (scroll) Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()) else Modifier),
+        verticalArrangement = Arrangement.spacedBy(if (many) 6.dp else 0.dp),
+    ) {
+        message.attachments.forEach { attachment ->
+            val voice = attachment.voice() && attachment.url.isNotBlank()
+            val playable = !voice && attachment.playsInline() && attachment.url.isNotBlank()
+            val gestures = Modifier.pointerInput(message.id, attachment.url, playable, voice) {
+                detectTapGestures(
+                    onTap = {
+                        when {
+                            voice -> Unit
+                            attachment.visual() || attachment.video() -> onOpen(attachment)
+                            playable -> ChatPlayback.play(
+                                context,
+                                attachment.url,
+                                attachment.name.ifBlank { "Audio" },
+                            )
+                            else -> onFile(attachment)
+                        }
+                    },
+                )
+            }
+            Column(Modifier.fillMaxWidth()) {
+                when {
+                    many && voice -> VoiceNoteBubble(
+                        messageId = message.id,
+                        attachment = attachment,
+                        fg = fg,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    many -> FileRow(attachment, fg, gestures)
+                    attachment.visual() -> AttachmentImage(
+                        attachment,
+                        Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)).then(gestures),
+                    )
+                    voice -> VoiceNoteBubble(
+                        messageId = message.id,
+                        attachment = attachment,
+                        fg = fg,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    )
+                    else -> Column(modifier = gestures.padding(vertical = 4.dp)) {
+                        Text("📎 ${attachment.name}", color = fg, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (playable) "Tap to play" else "Tap to download",
+                            color = fg.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                AttachmentProgressBar(message.id, attachment.index, fg)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FileRow(attachment: ChatAttachment, fg: Color, gestures: Modifier) {
+    Row(
+        gestures
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(fg.copy(alpha = 0.1f))
+            .padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (attachment.visual()) {
+            AttachmentImage(
+                attachment,
+                Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
+            )
+        } else {
+            Icon(
+                Icons.AutoMirrored.Filled.InsertDriveFile,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+        Column(Modifier.padding(start = 8.dp).weight(1f)) {
+            Text(
+                attachment.name.ifBlank { "File" },
+                color = fg,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                when {
+                    attachment.playsInline() -> "Tap to play"
+                    attachment.visual() || attachment.video() -> "Tap to open"
+                    else -> "Tap to download"
+                },
+                color = fg.copy(alpha = 0.7f),
+                fontSize = 11.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MultiFileActions(
+    messageId: String,
+    files: List<ChatAttachment>,
+    canShare: Boolean,
+    onSave: (List<ChatAttachment>) -> Unit,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var picked by remember(files) { mutableStateOf(files.map { it.index }.toSet()) }
+    val chosen = files.filter { it.index in picked }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "${chosen.size} of ${files.size} selected",
+            modifier = Modifier.weight(1f),
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(onClick = { picked = files.map { it.index }.toSet() }) { Text("All") }
+        TextButton(onClick = { picked = emptySet() }) { Text("None") }
+    }
+    Column(
+        Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState()),
+    ) {
+        files.forEach { file ->
+            val on = file.index in picked
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        picked = if (on) picked - file.index else picked + file.index
+                    }
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = on, onCheckedChange = null)
+                Text(
+                    file.name.ifBlank { "File" },
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+    fun act(block: suspend (List<ChatAttachment>) -> Unit) {
+        if (chosen.isEmpty()) {
+            Toast.makeText(context, "Select a file", Toast.LENGTH_SHORT).show()
+            return
+        }
+        onClose()
+        scope.launch { block(chosen) }
+    }
+    SheetAction("Save in app") { act { saveChatAttachmentsInApp(context, messageId, it) } }
+    SheetAction("Save to device") { act { saveChatAttachmentsToDevice(context, messageId, it) } }
+    if (chosen.size == 1) {
+        val one = chosen.first()
+        SheetAction("Open") {
+            onClose()
+            scope.launch { openChatAttachment(context, messageId, one) }
+        }
+    }
+    if (canShare) {
+        SheetAction("Share") { act { shareChatAttachments(context, messageId, it) } }
+    }
+    val link = chosen.singleOrNull()?.shareUrl?.takeIf { it.isNotBlank() }
+    if (link != null) {
+        SheetAction("Open in Aird") {
+            onClose()
+            openAirdShareInBrowser(context, link)
+        }
+    }
+    SheetAction("Save to Aird") {
+        if (chosen.isEmpty()) {
+            Toast.makeText(context, "Select a file", Toast.LENGTH_SHORT).show()
+        } else {
+            onSave(chosen)
         }
     }
 }

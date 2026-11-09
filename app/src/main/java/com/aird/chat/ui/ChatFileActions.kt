@@ -1,5 +1,6 @@
 package com.aird.chat.ui
 
+import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -177,6 +178,72 @@ suspend fun shareChatAttachment(context: Context, messageId: String, attachment:
             false
         }
     }
+
+suspend fun saveChatAttachmentsInApp(context: Context, messageId: String, attachments: List<ChatAttachment>): Int =
+    withContext(Dispatchers.IO) {
+        if (attachments.isEmpty()) return@withContext 0
+        var saved = 0
+        for (attachment in attachments) {
+            val file = ensureAppFile(context, messageId, attachment) ?: continue
+            if (file.isFile && file.length() > 0L) saved++
+        }
+        val total = attachments.size
+        toast(context, if (saved == total) "Saved $saved in app" else "Saved $saved of $total in app")
+        saved
+    }
+
+suspend fun saveChatAttachmentsToDevice(context: Context, messageId: String, attachments: List<ChatAttachment>): Int =
+    withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        if (attachments.isEmpty()) return@withContext 0
+        var saved = 0
+        for (attachment in attachments) {
+            val file = ensureAppFile(app, messageId, attachment) ?: continue
+            val name = safeChatFileName(attachment.name)
+            val guessedMime = guessChatMime(file.name, attachment.mediaKind)
+            val mime = if (guessedMime != "application/octet-stream") guessedMime else "application/octet-stream"
+            if (exportToDownloads(app, file, name, mime)) saved++
+        }
+        val total = attachments.size
+        toast(app, if (saved == total) "Saved $saved to Downloads" else "Saved $saved of $total to Downloads")
+        saved
+    }
+
+suspend fun shareChatAttachments(context: Context, messageId: String, attachments: List<ChatAttachment>): Boolean {
+    if (attachments.isEmpty()) return false
+    if (attachments.size == 1) return shareChatAttachment(context, messageId, attachments.first())
+    return withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        try {
+            val uris = ArrayList<Uri>()
+            for (attachment in attachments) {
+                val dest = ensureAppFile(app, messageId, attachment) ?: continue
+                uris.add(FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", dest))
+            }
+            if (uris.isEmpty()) {
+                toast(app, "Could not share these files")
+                return@withContext false
+            }
+            val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val clip = ClipData.newRawUri("files", uris.first())
+                uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+                clipData = clip
+            }
+            withContext(Dispatchers.Main) {
+                app.startActivity(Intent.createChooser(send, "Share ${uris.size} files").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            true
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: Exception) {
+            toast(app, "Could not share these files")
+            false
+        }
+    }
+}
 
 fun openAirdShareInBrowser(context: Context, shareUrl: String) {
     val path = shareUrl.trim()

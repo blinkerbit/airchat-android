@@ -47,6 +47,10 @@ data class ListDraft(
 
 data class ListGroup(val id: String, val name: String)
 
+data class CollabTag(val name: String, val color: String = "", val label: String = "") {
+    val shown: String get() = label.ifBlank { name }
+}
+
 data class ListSummary(
     val id: String,
     val title: String,
@@ -56,6 +60,8 @@ data class ListSummary(
     val total: Int,
     val nextDue: String,
     val active: Boolean,
+    val organizer: String = "",
+    val tags: List<CollabTag> = emptyList(),
 )
 
 data class PollSummary(
@@ -121,6 +127,7 @@ data class ListArtifact(
     val total: Int,
     val notes: String = "",
     val groupId: String = "",
+    val tags: List<CollabTag> = emptyList(),
     override val active: Boolean = true,
 ) : CollabArtifact() {
     override val heading: String get() = title

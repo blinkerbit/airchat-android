@@ -125,11 +125,16 @@ object CallDevices {
         val gen = ++routeGeneration
         val apply = Runnable {
             if (gen != routeGeneration) return@Runnable
-            selectSwitchByLabel(room, switchLabel(choice))
-            route(audio, choice)
+            try {
+                holdRoute(audio, room, choice)
+            } catch (_: Exception) {
+            }
         }
         if (Looper.myLooper() == Looper.getMainLooper()) apply.run() else main.post(apply)
-        main.postDelayed(apply, 400)
+        // Samsung reapplies its own route after setCommunicationDevice returns.
+        main.postDelayed(apply, 280)
+        main.postDelayed(apply, 900)
+        if (Build.MANUFACTURER.equals("samsung", true)) main.postDelayed(apply, 1700)
     }
 
     fun playback(context: Context, room: Room?): List<DeviceChoice> = audioOutputs(context, room)
@@ -175,30 +180,60 @@ object CallDevices {
         return if (name.isNotEmpty() && !name.contains("bluetooth", true)) "Bluetooth ($name)" else "Bluetooth"
     }
 
-    private fun route(audio: AudioManager, choice: DeviceChoice) {
+    private fun holdRoute(audio: AudioManager, room: Room?, choice: DeviceChoice) {
         val route = routeOf(choice)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        if (route != Route.Headset) {
+        preferSwitch(room, route, choice)
+        selectSwitchByLabel(room, switchLabel(choice))
+        @Suppress("DEPRECATION")
+        if (route != Route.Headset && audio.isBluetoothScoOn) {
             @Suppress("DEPRECATION")
             audio.stopBluetoothSco()
             @Suppress("DEPRECATION")
             audio.isBluetoothScoOn = false
         }
+        // S26 and other Samsung phones report success from setCommunicationDevice and
+        // then keep the previous speaker. The speakerphone flag has to be set as well.
+        @Suppress("DEPRECATION")
+        audio.isSpeakerphoneOn = route == Route.Speaker
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val listed = audio.availableCommunicationDevices
             val exactId = choice.id.substringAfter("comm:", "").toIntOrNull()
             val target = listed.firstOrNull { it.id == exactId } ?: listed.firstOrNull { matches(it, route) }
-            if (target != null && audio.setCommunicationDevice(target)) return
-            audio.clearCommunicationDevice()
+            if (target != null) {
+                audio.clearCommunicationDevice()
+                audio.setCommunicationDevice(target)
+            } else {
+                audio.clearCommunicationDevice()
+            }
         } else if (route == Route.Headset && (choice.id.startsWith("bt:") || choice.label.contains("Bluetooth", true))) {
             @Suppress("DEPRECATION")
             audio.startBluetoothSco()
             @Suppress("DEPRECATION")
             audio.isBluetoothScoOn = true
-            return
         }
         @Suppress("DEPRECATION")
         audio.isSpeakerphoneOn = route == Route.Speaker
+        audio.mode = AudioManager.MODE_IN_COMMUNICATION
+        selectSwitchByLabel(room, switchLabel(choice))
+    }
+
+    private fun preferSwitch(room: Room?, route: Route, choice: DeviceChoice) {
+        val handler = room?.audioSwitchHandler as? AudioSwitchHandler ?: return
+        handler.forceHandleAudioRouting = true
+        val speaker = AudioDevice.Speakerphone::class.java
+        val earpiece = AudioDevice.Earpiece::class.java
+        val wired = AudioDevice.WiredHeadset::class.java
+        val bluetooth = AudioDevice.BluetoothHeadset::class.java
+        handler.preferredDeviceList = when (route) {
+            Route.Speaker -> listOf(speaker, wired, bluetooth, earpiece)
+            Route.Earpiece -> listOf(earpiece, wired, bluetooth, speaker)
+            Route.Headset -> if (choice.label.contains("Wired", true)) {
+                listOf(wired, bluetooth, earpiece, speaker)
+            } else {
+                listOf(bluetooth, wired, earpiece, speaker)
+            }
+        }
     }
 
     private fun matches(dev: AudioDeviceInfo, route: Route): Boolean {

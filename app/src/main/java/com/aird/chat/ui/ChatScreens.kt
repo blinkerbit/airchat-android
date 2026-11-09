@@ -13,7 +13,13 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -64,7 +70,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
-import androidx.compose.material.icons.filled.Poll
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Description
@@ -77,6 +82,7 @@ import com.aird.SharedContent
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -108,9 +114,14 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -299,12 +310,21 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         }) {
                             Icon(Icons.Default.Checklist, contentDescription = "Lists")
                         }
-                        IconButton(onClick = {
-                            files = false
-                            lists = false
-                            polls = true
-                        }) {
-                            Icon(Icons.Default.Poll, contentDescription = "Polls")
+                        Box {
+                            IconButton(onClick = { themeMenu = true }) {
+                                Icon(Icons.Default.Palette, contentDescription = "Theme")
+                            }
+                            DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }) {
+                                AirdPalettes.all.forEach { palette ->
+                                    DropdownMenuItem(
+                                        text = { Text(if (palette.id == themeId) "${palette.label}  •" else palette.label) },
+                                        onClick = {
+                                            ThemeStore.set(context, palette.id)
+                                            themeMenu = false
+                                        },
+                                    )
+                                }
+                            }
                         }
                         IconButton(onClick = {
                             lists = false
@@ -318,95 +338,35 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                             Icon(Icons.Default.Search, contentDescription = "Search")
                         }
                         IconButton(onClick = { sheet = true }) { Icon(Icons.Default.Add, contentDescription = "New chat") }
-                        DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }) {
-                            AirdPalettes.all.forEach { palette ->
-                                DropdownMenuItem(
-                                    text = { Text(if (palette.id == themeId) "${palette.label}  •" else palette.label) },
-                                    onClick = {
-                                        ThemeStore.set(context, palette.id)
-                                        themeMenu = false
-                                    },
+                        val reducedMenu = LocalAirdReducedMotion.current
+                        val menuTurn by animateFloatAsState(
+                            targetValue = if (menu) 90f else 0f,
+                            animationSpec = if (reducedMenu) tween(80) else spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+                            label = "menuTurn",
+                        )
+                        Box {
+                            IconButton(onClick = { menu = !menu }) {
+                                Icon(
+                                    Icons.Default.MoreVert,
+                                    contentDescription = "Menu",
+                                    modifier = Modifier.graphicsLayer { rotationZ = if (reducedMenu) 0f else menuTurn },
                                 )
                             }
-                        }
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Menu") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Lists") },
-                                onClick = {
-                                    menu = false
-                                    files = false
-                                    polls = false
-                                    lists = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Polls") },
-                                onClick = {
-                                    menu = false
-                                    files = false
-                                    lists = false
-                                    polls = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Theme") },
-                                onClick = {
-                                    menu = false
-                                    themeMenu = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Files") },
-                                onClick = {
-                                    menu = false
-                                    lists = false
-                                    polls = false
-                                    filePath = ""
-                                    files = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Super Search") },
-                                onClick = {
-                                    menu = false
-                                    search = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Shared with me") },
-                                onClick = {
-                                    menu = false
-                                    shared = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Key backup") },
-                                onClick = {
-                                    menu = false
-                                    keys = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Enhanced secure") },
-                                onClick = {
-                                    menu = false
-                                    enhanced = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Settings") },
-                                onClick = {
-                                    menu = false
-                                    settings = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Sign out") },
-                                onClick = {
-                                    menu = false
-                                    Session.signOut(context)
-                                },
+                            HomeOverflowMenu(
+                                expanded = menu,
+                                reduced = reducedMenu,
+                                onDismiss = { menu = false },
+                                items = listOf(
+                                    "Lists" to { files = false; polls = false; lists = true },
+                                    "Polls" to { files = false; lists = false; polls = true },
+                                    "Files" to { lists = false; polls = false; filePath = ""; files = true },
+                                    "Super Search" to { search = true },
+                                    "Shared with me" to { shared = true },
+                                    "Key backup" to { keys = true },
+                                    "Enhanced secure" to { enhanced = true },
+                                    "Settings" to { settings = true },
+                                    "Sign out" to { Session.signOut(context) },
+                                ),
                             )
                         }
                     } else {
@@ -630,6 +590,68 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     BackHandler(enabled = keys) { keys = false }
     BackHandler(enabled = enhanced) { enhanced = false }
     BackHandler(enabled = settings) { settings = false }
+    }
+}
+
+@Composable
+private fun HomeOverflowMenu(
+    expanded: Boolean,
+    reduced: Boolean,
+    onDismiss: () -> Unit,
+    items: List<Pair<String, () -> Unit>>,
+) {
+    val state = remember { MutableTransitionState(false) }
+    state.targetState = expanded
+    if (!state.currentState && !state.targetState) return
+    val y = with(LocalDensity.current) { 40.dp.roundToPx() }
+    Popup(
+        alignment = Alignment.TopEnd,
+        offset = IntOffset(0, y),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        AnimatedVisibility(
+            visibleState = state,
+            enter = if (reduced) {
+                fadeIn(tween(120))
+            } else {
+                fadeIn(tween(140)) + scaleIn(
+                    initialScale = 0.84f,
+                    transformOrigin = TransformOrigin(1f, 0f),
+                    animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow),
+                )
+            },
+            exit = if (reduced) fadeOut(tween(80)) else fadeOut(tween(110)) + scaleOut(
+                targetScale = 0.92f,
+                transformOrigin = TransformOrigin(1f, 0f),
+                animationSpec = tween(130),
+            ),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 12.dp,
+                tonalElevation = 3.dp,
+            ) {
+                Column(Modifier.width(236.dp).padding(vertical = 6.dp)) {
+                    items.forEach { (label, action) ->
+                        val parting = label == "Sign out"
+                        if (parting) HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                        Text(
+                            label,
+                            color = if (parting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onDismiss()
+                                    action()
+                                }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -935,7 +957,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     var forward by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     val conversations by model.conversations.collectAsState()
     var picking by remember { mutableStateOf(false) }
-    var saveTarget by remember { mutableStateOf<Pair<ChatMessage, ChatAttachment>?>(null) }
+    var saveTarget by remember { mutableStateOf<Pair<ChatMessage, List<ChatAttachment>>?>(null) }
     var pinCursor by remember(conversation?.id) { mutableStateOf(0) }
     val density = LocalDensity.current
     val ime = WindowInsets.ime.getBottom(density)
@@ -1238,7 +1260,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                             model.react(message, it)
                         },
                         onPin = { model.pin(message) },
-                        onSave = { attachment -> saveTarget = message to attachment },
+                        onSave = { files -> saveTarget = message to files },
                         onRetry = { model.retry(message) },
                         pinned = pins.any { it.messageId == message.id },
                         enter = message.id in entering,
@@ -1422,12 +1444,12 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
             },
         )
     }
-    saveTarget?.let { (message, attachment) ->
+    saveTarget?.let { (message, files) ->
         AirdPathSheet(
             mode = AirdPickMode.Save,
             onDismiss = { saveTarget = null },
             onConfirm = { paths ->
-                model.saveCopy(message, attachment, paths.firstOrNull().orEmpty())
+                model.saveCopies(message, files, paths.firstOrNull().orEmpty())
                 saveTarget = null
             },
         )
