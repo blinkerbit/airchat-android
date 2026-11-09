@@ -1345,6 +1345,17 @@ object ChatRepository {
                 }
             }
             "chat_notify" -> {
+                if (data.optString("kind") == "collab") {
+                    val sender = data.optString("sender", "Aird")
+                    if (sender.equals(Session.username.value, true)) return
+                    val title = data.optString("title", sender)
+                    val preview = data.optString("preview", "Update")
+                    val convId = data.optString("conversation_id").ifBlank {
+                        "collab:" + data.optString("collab_kind") + ":" + data.optString("collab_id")
+                    }
+                    scope.launch { ChatNotifier.show(context, convId, title, sender, preview) }
+                    return
+                }
                 val convId = data.optString("conversation_id")
                 if (convId.isEmpty()) return
                 if (data.optString("sender").equals(Session.username.value, true)) return

@@ -39,17 +39,29 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
@@ -964,54 +976,171 @@ private fun FileList(
             }
             items(shown, key = { it.path }) { entry ->
                 val chosen = entry.path in selected
-                val textColor = if (chosen) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface
-                Row(
-                    Modifier
+                val style = getFileStyle(entry)
+
+                Surface(
+                    modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 64.dp)
-                        .background(if (chosen) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                        .combinedClickable(
-                            onClick = { onClick(entry) },
-                            onLongClick = { onLongClick(entry) },
-                        )
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .padding(horizontal = 12.dp, vertical = 3.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (chosen) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f)
+                            else MaterialTheme.colorScheme.surfaceContainer,
+                    border = if (chosen) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                    shadowElevation = if (chosen) 2.dp else 0.dp,
                 ) {
-                    Icon(
-                        if (entry.dir) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = textColor,
-                    )
-                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                        Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis, color = textColor, fontWeight = FontWeight.Medium)
-                        val meta = entryMeta(entry, place)
-                        if (meta.isNotEmpty()) {
-                            Text(meta, maxLines = 1, overflow = TextOverflow.Ellipsis, color = textColor.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { onClick(entry) },
+                                onLongClick = { onLongClick(entry) },
+                            )
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(style.containerColor)
+                        ) {
+                            Icon(
+                                style.icon,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp),
+                                tint = style.iconColor
+                            )
                         }
-                        if (entry.tags.isNotEmpty()) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(top = 4.dp)) {
-                                entry.tags.take(3).forEach { name ->
-                                    TagDot(name, colors[name])
-                                }
-                                if (entry.tags.size > 3) {
-                                    Text("+${entry.tags.size - 3}", style = MaterialTheme.typography.labelSmall, color = textColor)
+
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                            Text(
+                                entry.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                            val meta = entryMeta(entry, place)
+                            if (meta.isNotEmpty()) {
+                                Text(
+                                    meta,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            if (entry.tags.isNotEmpty()) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    entry.tags.take(3).forEach { name ->
+                                        TagDot(name, colors[name])
+                                    }
+                                    if (entry.tags.size > 3) {
+                                        Text(
+                                            "+${entry.tags.size - 3}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
-                    if (opening == entry.path) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else if (chosen) {
-                        Icon(Icons.Default.Check, contentDescription = "Selected", tint = textColor)
-                    } else if (managing) {
-                        IconButton(onClick = { onMore(entry) }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Actions", tint = textColor)
+
+                        if (opening == entry.path) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        } else if (chosen) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            ) {
+                                Icon(
+                                    Icons.Default.Check,
+                                    contentDescription = "Selected",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        } else if (managing) {
+                            IconButton(onClick = { onMore(entry) }, modifier = Modifier.size(36.dp)) {
+                                Icon(
+                                    Icons.Default.MoreVert,
+                                    contentDescription = "Actions",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private data class FileStyle(
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val containerColor: Color,
+    val iconColor: Color,
+)
+
+@Composable
+private fun getFileStyle(entry: AirdEntry): FileStyle {
+    if (entry.dir) {
+        return FileStyle(
+            Icons.Default.Folder,
+            MaterialTheme.colorScheme.primaryContainer,
+            MaterialTheme.colorScheme.primary
+        )
+    }
+    val ext = entry.name.substringAfterLast('.', "").lowercase()
+    return when (ext) {
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic" -> FileStyle(
+            Icons.Default.Image,
+            Color(0xFFE3F2FD),
+            Color(0xFF1976D2)
+        )
+        "mp4", "mkv", "mov", "avi", "webm" -> FileStyle(
+            Icons.Default.VideoFile,
+            Color(0xFFFFEBEE),
+            Color(0xFFD32F2F)
+        )
+        "mp3", "m4a", "wav", "aac", "ogg", "flac" -> FileStyle(
+            Icons.Default.AudioFile,
+            Color(0xFFFFF3E0),
+            Color(0xFFF57C00)
+        )
+        "pdf" -> FileStyle(
+            Icons.Default.PictureAsPdf,
+            Color(0xFFFFEBEE),
+            Color(0xFFC62828)
+        )
+        "doc", "docx", "txt", "rtf", "md" -> FileStyle(
+            Icons.Default.Description,
+            Color(0xE3E8EAF6),
+            Color(0xFF303F9F)
+        )
+        "zip", "tar", "gz", "7z", "rar" -> FileStyle(
+            Icons.Default.FolderZip,
+            Color(0xFFF3E5F5),
+            Color(0xFF7B1FA2)
+        )
+        "apk" -> FileStyle(
+            Icons.Default.Android,
+            Color(0xE3E8F5E9),
+            Color(0xFF388E3C)
+        )
+        else -> FileStyle(
+            Icons.AutoMirrored.Filled.InsertDriveFile,
+            MaterialTheme.colorScheme.surfaceVariant,
+            MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
