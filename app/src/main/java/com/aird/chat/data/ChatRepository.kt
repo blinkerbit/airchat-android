@@ -844,7 +844,7 @@ object ChatRepository {
         val rel = path.trim().trim('/')
         val name = tag.trim()
         if (rel.isEmpty() || name.isEmpty()) return FileOp(false, "Could not tag")
-        val id = userTagId(context, name) ?: return FileOp(false, "Could not tag")
+        val id = userTagId(context, name) ?: return FileOp(false, "Could not resolve tag")
         val response = try {
             AirdHttp.send(
                 context,
@@ -856,12 +856,23 @@ object ChatRepository {
             return FileOp(false, err.message ?: "Could not tag")
         }
         if (response.ok) return FileOp(true, "")
+        val altResponse = try {
+            AirdHttp.send(
+                context,
+                "/api/user-tags/$id/links",
+                "POST",
+                JSONObject().put("kind", "file").put("resource_key", "/$rel"),
+            )
+        } catch (_: Exception) {
+            response
+        }
+        if (altResponse.ok) return FileOp(true, "")
         return FileOp(false, fileMessage(response, "Could not tag"), response.code == 403)
     }
 
     suspend fun untagPath(context: Context, path: String, tag: String): FileOp {
         val rel = path.trim().trim('/')
-        val id = tagCatalog(context).tags.find { it.name == tag }?.id
+        val id = tagCatalog(context).tags.find { it.name.equals(tag, ignoreCase = true) }?.id
             ?: return FileOp(false, "Could not remove the tag")
         val response = try {
             AirdHttp.send(
@@ -878,22 +889,23 @@ object ChatRepository {
     }
 
     private suspend fun userTagId(context: Context, name: String): Int? {
-        tagCatalog(context).tags.find { it.name == name }?.id?.let { return it }
+        val cat = tagCatalog(context)
+        cat.tags.find { it.name.equals(name, ignoreCase = true) }?.id?.let { return it }
         val created = try {
             AirdHttp.send(
                 context,
                 "/api/user-tags",
                 "POST",
-                JSONObject().put("name", name).put("access", "none"),
+                JSONObject().put("name", name),
             )
         } catch (_: Exception) {
-            return null
+            null
         }
-        if (created.ok) {
+        if (created != null && created.ok) {
             val id = created.json().optInt("id")
             if (id != 0) return id
         }
-        return tagCatalog(context).tags.find { it.name == name }?.id
+        return tagCatalog(context).tags.find { it.name.equals(name, ignoreCase = true) }?.id
     }
 
     suspend fun uploadUri(

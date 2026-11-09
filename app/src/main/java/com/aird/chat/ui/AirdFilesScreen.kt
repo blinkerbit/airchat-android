@@ -332,6 +332,22 @@ fun AirdFilesScreen(
                     }
                 },
                 actions = {
+                    if (managing) {
+                        IconButton(onClick = { draft = ""; dialog = FilesDialog.NewFolder }, enabled = !busy) {
+                            Icon(
+                                Icons.Default.CreateNewFolder,
+                                contentDescription = "New folder",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        IconButton(onClick = { uploadDest = folder; uploadChooser = true }, enabled = !busy) {
+                            Icon(
+                                Icons.Outlined.FileUpload,
+                                contentDescription = "Upload",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
                     IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) query = "" }) {
                         Icon(Icons.Default.Search, contentDescription = "Filter")
                     }
@@ -1145,10 +1161,14 @@ private fun getFileStyle(entry: AirdEntry): FileStyle {
 }
 
 @Composable
-private fun TagDot(name: String, hex: String?) {
+private fun TagDot(name: String, hex: String?, onClick: (() -> Unit)? = null) {
     val bg = tagColor(hex) ?: MaterialTheme.colorScheme.secondaryContainer
     val fg = if (hex.isNullOrBlank()) MaterialTheme.colorScheme.onSecondaryContainer else Color.White
-    Surface(color = bg, shape = RoundedCornerShape(8.dp)) {
+    Surface(
+        color = bg,
+        shape = RoundedCornerShape(8.dp),
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    ) {
         Text(name, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = fg, style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
 }

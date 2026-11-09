@@ -26,13 +26,51 @@ data class PollDraft(
     val privateShare: Boolean,
 )
 
-data class ListEntry(val id: String, val text: String, val done: Boolean, val labels: List<String>)
+data class ListEntry(
+    val id: String,
+    val text: String,
+    val done: Boolean,
+    val labels: List<String>,
+    val notes: String = "",
+    val dueAt: String = "",
+    val remindAt: String = "",
+)
 
 data class ListDraft(
     val title: String,
     val style: String,
     val items: List<String>,
     val privateShare: Boolean,
+    val notes: String = "",
+    val groupId: String = "",
+)
+
+data class ListGroup(val id: String, val name: String)
+
+data class ListSummary(
+    val id: String,
+    val title: String,
+    val style: String,
+    val groupId: String,
+    val done: Int,
+    val total: Int,
+    val nextDue: String,
+    val active: Boolean,
+)
+
+data class PollSummary(
+    val id: String,
+    val question: String,
+    val votes: Int,
+    val active: Boolean,
+)
+
+data class ListReminder(
+    val listId: String,
+    val itemId: String,
+    val text: String,
+    val title: String,
+    val remindAt: String,
 )
 
 data class MeetDraft(val title: String, val privateShare: Boolean)
@@ -78,6 +116,8 @@ data class ListArtifact(
     override val participants: List<String>,
     val title: String,
     val style: String,
+    val notes: String = "",
+    val groupId: String = "",
     val items: List<ListEntry>,
     val done: Int,
     val total: Int,
@@ -109,7 +149,7 @@ fun PollArtifact.toDraft() = PollDraft(
     privateShare,
 )
 
-fun ListArtifact.toDraft() = ListDraft(title, if (style == "bullet") "bullet" else "todo", emptyList(), privateShare)
+fun ListArtifact.toDraft() = ListDraft(title, if (style == "bullet") "bullet" else "todo", emptyList(), privateShare, notes, groupId)
 
 fun MeetArtifact.toDraft() = MeetDraft(title, privateShare)
 
