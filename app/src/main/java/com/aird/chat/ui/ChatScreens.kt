@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import com.aird.chat.data.CollabRepository
 import com.aird.chat.data.ConversationPrefs
 import com.aird.chat.data.DraftStore
 import com.aird.chat.model.formatDateHeader
@@ -838,7 +839,9 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     val filteredMessages = remember(messages, searchQuery) {
         if (searchQuery.isBlank()) messages
         else messages.filter {
-            it.body.contains(searchQuery, ignoreCase = true) || it.sender.contains(searchQuery, ignoreCase = true)
+            it.body.contains(searchQuery, ignoreCase = true) ||
+                it.sender.contains(searchQuery, ignoreCase = true) ||
+                it.cardTitle.contains(searchQuery, ignoreCase = true)
         }
     }
     var panel by remember { mutableStateOf("") }
@@ -849,7 +852,6 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     var confirmBulkDelete by remember(conversationId) { mutableStateOf(false) }
     var forward by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     val conversations by model.conversations.collectAsState()
-    var attachChoice by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
     var saveTarget by remember { mutableStateOf<Pair<ChatMessage, ChatAttachment>?>(null) }
     var pinCursor by remember(conversation?.id) { mutableStateOf(0) }
@@ -939,6 +941,11 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                 }
             }
         }
+    }
+
+    LaunchedEffect(conversationId) {
+        CollabRepository.close()
+        CollabRepository.loadShelf(context, conversationId)
     }
 
     LaunchedEffect(highlightId) {
@@ -1234,9 +1241,25 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                 reply = reply?.let { "Reply to ${it.sender}: ${it.previewLabel()}" }.orEmpty(),
                 onClearReply = { reply = null },
                 uploading = uploading,
-                onAttach = {
+                onPhotos = {
                     panel = ""
-                    attachChoice = true
+                    launchPhotos()
+                },
+                onTakePhoto = {
+                    panel = ""
+                    ensureCamera(false)
+                },
+                onRecordVideo = {
+                    panel = ""
+                    ensureCamera(true)
+                },
+                onPickDevice = {
+                    panel = ""
+                    picker.launch(arrayOf("*/*"))
+                },
+                onPickAird = {
+                    panel = ""
+                    picking = true
                 },
                 onSend = {
                     val text = draft.trim()
@@ -1303,32 +1326,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
             },
         )
     }
-    if (attachChoice) {
-        ModalBottomSheet(onDismissRequest = { attachChoice = false }) {
-            Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-                TextButton(onClick = {
-                    attachChoice = false
-                    launchPhotos()
-                }, modifier = Modifier.fillMaxWidth()) { Text("Photos and videos") }
-                TextButton(onClick = {
-                    attachChoice = false
-                    ensureCamera(false)
-                }, modifier = Modifier.fillMaxWidth()) { Text("Take photo") }
-                TextButton(onClick = {
-                    attachChoice = false
-                    ensureCamera(true)
-                }, modifier = Modifier.fillMaxWidth()) { Text("Record video") }
-                TextButton(onClick = {
-                    attachChoice = false
-                    picker.launch(arrayOf("*/*"))
-                }, modifier = Modifier.fillMaxWidth()) { Text("From this device") }
-                TextButton(onClick = {
-                    attachChoice = false
-                    picking = true
-                }, modifier = Modifier.fillMaxWidth()) { Text("From Aird") }
-            }
-        }
-    }
+    CollabFocusSheet()
     if (picking) {
         AirdPathSheet(
             mode = AirdPickMode.Attach,

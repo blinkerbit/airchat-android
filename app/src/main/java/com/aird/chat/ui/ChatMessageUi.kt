@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Pause
@@ -42,7 +43,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.emoji2.emojipicker.EmojiPickerView
 import com.aird.chat.data.EmojiPreferences
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
@@ -51,6 +51,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -114,7 +115,9 @@ import com.aird.chat.data.ChatRepository
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
 import com.aird.chat.model.ReadReceipt
+import com.aird.chat.model.collabMentions
 import com.aird.chat.model.editAllowed
+import com.aird.chat.model.textWithoutCollab
 import java.time.Instant
 import com.aird.session.AirdHttp
 import com.aird.session.Session
@@ -360,36 +363,51 @@ fun MessageRow(
                         },
                         sheetState = sheetState,
                     ) {
-                        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Reactions.forEach { emoji ->
-                                Text(
-                                    emoji,
-                                    fontSize = 22.sp,
-                                    modifier = Modifier.clickable {
-                                        menu = false
-                                        showEmojiPicker = false
-                                        onReact(emoji)
-                                    }.padding(6.dp),
-                                )
-                            }
-                            IconButton(onClick = { showEmojiPicker = !showEmojiPicker }) {
-                                Icon(Icons.Default.Add, contentDescription = "More reactions")
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(28.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
+                                    Reactions.forEach { emoji ->
+                                        val shown = EmojiPreferences.applySkinTone(emoji, context)
+                                        Text(
+                                            shown,
+                                            fontSize = 22.sp,
+                                            modifier = Modifier
+                                                .clip(CircleShape)
+                                                .clickable {
+                                                    menu = false
+                                                    showEmojiPicker = false
+                                                    onReact(shown)
+                                                }
+                                                .padding(horizontal = 6.dp, vertical = 8.dp),
+                                        )
+                                    }
+                                    IconButton(onClick = { showEmojiPicker = !showEmojiPicker }, modifier = Modifier.size(36.dp)) {
+                                        Icon(
+                                            if (showEmojiPicker) Icons.Default.Close else Icons.Default.Add,
+                                            contentDescription = if (showEmojiPicker) "Close emoji" else "More reactions",
+                                        )
+                                    }
+                                }
                             }
                         }
                         if (showEmojiPicker) {
-                            AndroidView(
-                                modifier = Modifier.fillMaxWidth().height(300.dp),
-                                factory = { ctx -> EmojiPickerView(ctx) },
-                                update = { view ->
-                                    view.setOnEmojiPickedListener { item ->
-                                        showEmojiPicker = false
-                                        menu = false
-                                        val chosen = EmojiPreferences.applySkinTone(item.emoji, view.context)
-                                        onReact(chosen)
-                                    }
+                            EmojiPanel(
+                                modifier = Modifier.fillMaxWidth().height(320.dp),
+                                onPick = { emoji ->
+                                    showEmojiPicker = false
+                                    menu = false
+                                    onReact(emoji)
                                 },
                             )
                         }
+                        if (!showEmojiPicker) {
                         SheetAction("Reply") { menu = false; onReply() }
                         SheetAction("Copy") {
                             menu = false
@@ -444,6 +462,7 @@ fun MessageRow(
                             }
                         }
                         SheetAction(if (pinned) "Unpin" else "Pin") { menu = false; onPin() }
+                        }
                     }
                 }
             }
@@ -575,9 +594,13 @@ private fun Bubble(
         animationSpec = tween(500),
         label = "bubbleHighlight",
     )
+    val readable = message.decryptOk && !message.body.equals("Encrypted message", true)
+    val mentions = if (readable) collabMentions(message.body) else emptyList()
+    val shownBody = if (readable) textWithoutCollab(message.body) else message.body
+    val collab = message.cardId.isNotBlank() || mentions.isNotEmpty()
 
     Column(
-        Modifier.widthIn(max = 300.dp)
+        Modifier.widthIn(min = if (collab) 232.dp else 0.dp, max = if (collab) 320.dp else 300.dp)
             .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = if (mine) 18.dp else 4.dp, bottomEnd = if (mine) 4.dp else 18.dp))
             .background(animatedBg)
             .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -652,6 +675,12 @@ private fun Bubble(
                 AttachmentProgressBar(message.id, attachment.index, fg)
             }
         }
+        if (message.cardId.isNotBlank()) {
+            CollabInline(message.cardKind.ifBlank { "poll" }, message.cardId, "", message.cardTitle, mine)
+        }
+        mentions.forEach { mention ->
+            CollabInline(mention.kind, "", mention.slug, "", mine)
+        }
         if (message.e2e && !message.decryptOk) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -674,10 +703,8 @@ private fun Bubble(
                     Text("Retry", color = fg)
                 }
             }
-        } else if (message.body.isNotBlank() && message.body != "Encrypted message" || message.attachments.isEmpty()) {
-            if (message.body.isNotBlank()) {
-                MessageBodyText(message.body, fg, mine)
-            }
+        } else if (shownBody.isNotBlank() && shownBody != "Encrypted message") {
+            MessageBodyText(shownBody, fg, mine)
         }
     }
 }

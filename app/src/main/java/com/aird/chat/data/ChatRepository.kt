@@ -19,6 +19,7 @@ import com.aird.chat.model.Member
 import com.aird.chat.model.Reaction
 import com.aird.chat.model.ReadReceipt
 import com.aird.chat.model.nowIso
+import com.aird.chat.model.previewText
 import com.aird.session.AirdHttp
 import com.aird.session.AirdSocket
 import com.aird.session.Session
@@ -1046,6 +1047,7 @@ object ChatRepository {
                 if (convId.isEmpty() || data.optString("username") == Session.username.value) return
                 scope.launch { ChatE2E.encrypt(context, convId, "") }
             }
+            "collab_update" -> scope.launch { CollabRepository.onRemote(context, data) }
             "chat_e2e_key_ready" -> {
                 val convId = data.optString("conversation_id")
                 if (convId.isNotEmpty() && convId == _activeId.value) {
@@ -1101,7 +1103,7 @@ object ChatRepository {
                     mentions = names,
                 )
             }
-            touchConversation(context, convId, preview = body, updatedAt = stamp)
+            touchConversation(context, convId, preview = previewText(body), updatedAt = stamp)
             id
         } else {
             existingLocalId
@@ -1115,6 +1117,7 @@ object ChatRepository {
         if (AirdSocket.send(socket.toString()) && awaitEcho(localId)) {
             dropOutbox(context, localId)
             refresh(context, quiet = true)
+            pinCollab(context, convId, body)
             return true
         }
         val posted = postText(context, convId, body, replyToId, sealed, names, localId)
@@ -1124,8 +1127,17 @@ object ChatRepository {
         if (posted.ok) {
             dropOutbox(context, localId)
             refresh(context, quiet = true)
+            pinCollab(context, convId, body)
         }
         return posted.ok
+    }
+
+    private suspend fun pinCollab(context: Context, convId: String, body: String) {
+        try {
+            CollabRepository.pinMentions(context, convId, body)
+        } catch (err: Exception) {
+            if (err is kotlinx.coroutines.CancellationException) throw err
+        }
     }
 
     private suspend fun awaitEcho(localId: String?): Boolean {
@@ -1178,7 +1190,7 @@ object ChatRepository {
             touchConversation(context, convId, preview = previewForList(item), updatedAt = item.createdAt)
         } else if (localId != null) {
             updateMessages { current -> current.filterNot { it.id == localId } }
-            touchConversation(context, convId, preview = body, updatedAt = nowIso())
+            touchConversation(context, convId, preview = previewText(body), updatedAt = nowIso())
         }
         return TextPost(ok = true, queue = false)
     }
@@ -1512,6 +1524,13 @@ object ChatRepository {
             sealed != null -> decrypted ?: "Encrypted message"
             else -> plain(item.optString("body"))
         }
+        val card = meta?.optJSONObject("card")
+        val snap = card?.optJSONObject("snapshot")
+        val cardKind = card?.optString("kind").orEmpty().lowercase()
+        val cardId = card?.optString("id").orEmpty()
+        val cardTitle = card?.optString("title").orEmpty().ifBlank {
+            snap?.optString("title").orEmpty().ifBlank { snap?.optString("question").orEmpty() }
+        }
         val sender = item.optString("sender_username")
             .ifEmpty { item.optString("sender") }
             .ifEmpty { item.optString("username") }
@@ -1533,6 +1552,10 @@ object ChatRepository {
             reactions = reactionsOf(item.optJSONArray("reactions")),
             forwarded = meta?.optJSONObject("forwarded_from") != null || item.optJSONObject("forwarded_from") != null,
             edited = messageWasEdited(item),
+            msgType = item.optString("msg_type").ifBlank { if (cardId.isNotBlank()) "card" else "text" },
+            cardKind = cardKind,
+            cardId = cardId,
+            cardTitle = cardTitle,
         )
     }
 

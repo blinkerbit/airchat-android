@@ -22,7 +22,6 @@ import com.aird.session.AirdHttp
 import com.aird.session.AirdSocket
 import com.aird.session.Session
 import io.livekit.android.LiveKit
-import io.livekit.android.audio.AudioSwitchHandler
 import io.livekit.android.events.DisconnectReason
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
@@ -33,6 +32,7 @@ import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
+import io.livekit.android.util.flow
 import livekit.org.webrtc.Camera2Enumerator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +63,7 @@ data class CallSnapshot(
     val microphoneId: String = "",
     val output: String = "",
     val routeHint: String = "",
+    val meet: Boolean = false,
 )
 
 data class Drag(val x: Float = 0f, val y: Float = 0f)
@@ -101,6 +102,7 @@ object CallController {
     private val silenced = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
     private var room: Room? = null
     private var events: Job? = null
+    private var localWatch: Job? = null
     private var remoteDrop: Job? = null
     private var ringer: Ringtone? = null
     private var generation = 0
@@ -338,6 +340,50 @@ object CallController {
         }
     }
 
+    fun joinMeet(context: Context, meetId: String, title: String): Boolean {
+        if (meetId.isBlank() || _snapshot.value.phase != CallPhase.Idle) return false
+        app = context.applicationContext
+        val started = generation
+        _snapshot.value = CallSnapshot(
+            phase = CallPhase.Joining,
+            peer = title.ifBlank { "Meeting" },
+            mode = "video",
+            status = "Joining…",
+            speaker = true,
+            cameraOn = true,
+            output = "speaker",
+            playbackId = "speaker",
+            meet = true,
+        )
+        scope.launch {
+            try {
+                val response = AirdHttp.send(context, "/api/meet/$meetId/token", "POST", JSONObject())
+                if (generation != started) return@launch
+                if (!response.ok) {
+                    val raw = response.json().optString("error").trim()
+                    val message = if (raw.isBlank() || raw.length > 160 || '<' in raw) "Could not join" else raw
+                    finish(context, message, signal = false, shade = null)
+                    return@launch
+                }
+                connect(
+                    context,
+                    response.json().optString("url"),
+                    response.json().optString("token"),
+                    video = true,
+                    camera = true,
+                )
+                if (generation == started && _snapshot.value.meet && _snapshot.value.phase == CallPhase.Joining) {
+                    markConnected(context)
+                }
+            } catch (err: Exception) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                if (generation != started) return@launch
+                finish(context, "Could not join", signal = false, shade = null)
+            }
+        }
+        return true
+    }
+
     fun start(context: Context, conversationId: String, peer: String, mode: String) {
         app = context.applicationContext
         if (_snapshot.value.phase != CallPhase.Idle) return
@@ -538,10 +584,7 @@ object CallController {
             try {
                 if (!cameraOn) _localVideo.value = null
                 room?.localParticipant?.setCameraEnabled(cameraOn)
-                if (cameraOn) {
-                    val track = room?.localParticipant?.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
-                    if (track != null) _localVideo.value = track
-                }
+                syncLocalVideo(cameraOn = cameraOn)
             } catch (_: Exception) {
             }
         }
@@ -562,11 +605,7 @@ object CallController {
         scope.launch {
             try {
                 room?.localParticipant?.setCameraEnabled(next)
-                if (next) {
-                    val pub = room?.localParticipant?.getTrackPublication(Track.Source.CAMERA)
-                    val track = pub?.track as? VideoTrack
-                    if (track != null) _localVideo.value = track
-                }
+                syncLocalVideo(cameraOn = next)
             } catch (_: Exception) {
             }
         }
@@ -706,7 +745,7 @@ object CallController {
         val audio = context.getSystemService(AudioManager::class.java)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         val next = LiveKit.create(context.applicationContext)
-        (next.audioSwitchHandler as? AudioSwitchHandler)?.forceHandleAudioRouting = true
+        CallDevices.prepareRouter(next, speakerDefault = video)
         room = next
         events?.cancel()
         events = scope.launch {
@@ -762,6 +801,8 @@ object CallController {
         }
         CallDevices.applyOutput(context, next, playback)
         AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video, cameraOn)
+        syncLocalVideo(next, cameraOn)
+        watchLocalVideo(next, gen)
         if (next.remoteParticipants.isNotEmpty()) markConnected(context)
     }
 
@@ -804,12 +845,15 @@ object CallController {
                 if (event.participant != room?.localParticipant) return
                 val track = event.publication.track as? VideoTrack ?: return
                 if (event.publication.source == Track.Source.SCREEN_SHARE) _screenVideo.value = track
-                else if (event.publication.source == Track.Source.CAMERA) _localVideo.value = track
+                else _localVideo.value = track
             }
             is RoomEvent.TrackMuted -> {
                 if (event.publication.source == Track.Source.CAMERA) {
-                    if (event.participant == room?.localParticipant) _localVideo.value = null
-                    else _remoteVideo.value = null
+                    if (event.participant == room?.localParticipant) {
+                        if (!_snapshot.value.cameraOn) _localVideo.value = null
+                    } else {
+                        _remoteVideo.value = null
+                    }
                 }
             }
             is RoomEvent.TrackUnmuted -> {
@@ -864,6 +908,7 @@ object CallController {
     }
 
     private fun watchRemoteDrop(context: Context) {
+        if (_snapshot.value.meet) return
         val phase = _snapshot.value.phase
         if (phase != CallPhase.Live && phase != CallPhase.Joining) return
         val active = room ?: return
@@ -934,11 +979,39 @@ object CallController {
         scope.launch {
             try {
                 if (!current.muted && hasMicrophone(context)) active.localParticipant.setMicrophoneEnabled(true)
-                if (current.cameraOn) active.localParticipant.setCameraEnabled(true)
+                if (current.cameraOn) {
+                    active.localParticipant.setCameraEnabled(true)
+                    syncLocalVideo(active, true)
+                }
                 val playback = current.playbackId.ifEmpty { current.output }
                 if (playback.isNotEmpty()) CallDevices.applyOutput(context, active, playback)
             } catch (err: Exception) {
                 if (err is kotlinx.coroutines.CancellationException) throw err
+            }
+        }
+    }
+
+    private fun syncLocalVideo(active: Room? = room, cameraOn: Boolean = _snapshot.value.cameraOn) {
+        val live = active ?: return
+        if (!cameraOn) {
+            _localVideo.value = null
+            return
+        }
+        val pubs = live.localParticipant.videoTrackPublications
+        val camera = pubs.firstNotNullOfOrNull { (pub, track) ->
+            if (pub.source == Track.Source.CAMERA) track as? VideoTrack else null
+        } ?: pubs.firstNotNullOfOrNull { (pub, track) ->
+            if (pub.source != Track.Source.SCREEN_SHARE) track as? VideoTrack else null
+        }
+        if (camera != null) _localVideo.value = camera
+    }
+
+    private fun watchLocalVideo(live: Room, gen: Int) {
+        localWatch?.cancel()
+        localWatch = scope.launch {
+            live.localParticipant::videoTrackPublications.flow.collect {
+                if (generation != gen || room !== live) return@collect
+                syncLocalVideo(live)
             }
         }
     }
@@ -967,6 +1040,8 @@ object CallController {
         }
         silence(current.callId)
         events?.cancel()
+        localWatch?.cancel()
+        localWatch = null
         val active = room
         room = null
         _remoteVideo.value = null

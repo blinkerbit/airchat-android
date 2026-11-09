@@ -2,8 +2,11 @@ package com.aird.call.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Outline
 import android.media.projection.MediaProjectionManager
+import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -54,6 +57,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,7 +71,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -120,7 +127,7 @@ fun CallScreen() {
     }
     val tileFeed = if (call.mode != "video" || full == null) null else if (swapped) remote?.takeIf { it != full } else self?.takeIf { it != full }
     Box(Modifier.fillMaxSize().background(CallBg)) {
-        if (full != null) VideoSurface(full, Modifier.fillMaxSize())
+        if (full != null) key("stage") { VideoSurface(full, Modifier.fillMaxSize()) }
         if (!inPip && full == null) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.size(112.dp).clip(CircleShape).background(Color(0xFF1F2C34)), contentAlignment = Alignment.Center) {
@@ -165,24 +172,33 @@ fun CallScreen() {
         }
         if (!inPip && tileFeed != null && !collapsed && call.phase != CallPhase.Idle) {
             Box(
-                Modifier.align(Alignment.TopEnd).offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }.padding(top = 48.dp, end = 16.dp),
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .zIndex(2f)
+                    .offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
+                    .padding(top = 48.dp, end = 16.dp)
+                    .size(width = 108.dp, height = 160.dp)
+                    .background(Color.Black, RoundedCornerShape(16.dp)),
             ) {
-                VideoSurface(
-                    tileFeed,
-                    Modifier.size(width = 108.dp, height = 160.dp).clip(RoundedCornerShape(16.dp)).pointerInput(tileFeed) {
-                        var moved = 0f
-                        detectDragGestures(
-                            onDrag = { change, drag ->
-                                change.consume()
-                                moved += abs(drag.x) + abs(drag.y)
-                                CallController.moveTile(tile.x + drag.x, tile.y + drag.y)
-                            },
-                            onDragEnd = {
-                                if (moved < 12f) CallController.swapFeeds()
-                            },
-                        )
-                    },
-                )
+                key("self") {
+                    VideoSurface(
+                        tileFeed,
+                        Modifier.fillMaxSize().pointerInput(tileFeed) {
+                            var moved = 0f
+                            detectDragGestures(
+                                onDrag = { change, drag ->
+                                    change.consume()
+                                    moved += abs(drag.x) + abs(drag.y)
+                                    CallController.moveTile(tile.x + drag.x, tile.y + drag.y)
+                                },
+                                onDragEnd = {
+                                    if (moved < 12f) CallController.swapFeeds()
+                                },
+                            )
+                        },
+                        corners = 16.dp,
+                    )
+                }
                 Text(
                     "–",
                     color = Color.White,
@@ -372,8 +388,7 @@ fun CallBubble() {
                 .offset { IntOffset(bubble.x.roundToInt(), bubble.y.roundToInt()) }
                 .padding(top = 72.dp, end = 12.dp)
                 .size(width = 200.dp, height = 356.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color.Black),
+                .background(Color.Black, RoundedCornerShape(20.dp)),
         ) {
             if (feed != null) {
                 VideoSurface(
@@ -390,6 +405,7 @@ fun CallBubble() {
                             onDragEnd = { if (moved < 12f) CallController.expand() },
                         )
                     },
+                    corners = 20.dp,
                 )
             } else {
                 Box(
@@ -524,13 +540,13 @@ private fun VideoSurface(
     modifier: Modifier,
     mirror: Boolean? = null,
     fit: Boolean = false,
+    corners: Dp = 0.dp,
 ) {
-    val room = CallController.room()
     val context = LocalContext.current
     val call by CallController.snapshot.collectAsState()
     val localVideo by CallController.localVideo.collectAsState()
     val screenVideo by CallController.screenVideo.collectAsState()
-    val bound = remember { arrayOfNulls<VideoTrack>(1) }
+    val radiusPx = with(LocalDensity.current) { corners.toPx() }
 
     val shouldMirror = remember(track, mirror, call.cameraId, localVideo, screenVideo) {
         if (mirror != null) {
@@ -563,25 +579,34 @@ private fun VideoSurface(
         factory = { ctx ->
             TextureViewRenderer(ctx).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                room?.initVideoRenderer(this)
-                setScalingType(scalingType)
-                setMirror(shouldMirror)
-                setEnableHardwareScaler(true)
+                addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> v.invalidateOutline() }
+                tag = RenderBinding()
             }
         },
         update = { view ->
+            val binding = view.tag as? RenderBinding ?: RenderBinding().also { view.tag = it }
+            if (!binding.ready) {
+                val live = CallController.room()
+                if (live != null) {
+                    live.initVideoRenderer(view)
+                    view.setEnableHardwareScaler(false)
+                    binding.ready = true
+                }
+            }
+            view.applyCorners(radiusPx)
+            if (!binding.ready) return@AndroidView
             view.setScalingType(scalingType)
             view.setMirror(shouldMirror)
-            val previous = bound[0]
-            if (previous != track) {
-                previous?.removeRenderer(view)
+            if (binding.track !== track) {
+                binding.track?.removeRenderer(view)
                 track.addRenderer(view)
-                bound[0] = track
+                binding.track = track
             }
         },
         onRelease = { view ->
-            bound[0]?.removeRenderer(view)
-            bound[0] = null
+            val binding = view.tag as? RenderBinding
+            binding?.track?.removeRenderer(view)
+            binding?.track = null
             try {
                 view.clearImage()
                 view.release()
@@ -589,4 +614,28 @@ private fun VideoSurface(
             }
         },
     )
+}
+
+private class RenderBinding(var ready: Boolean = false, var track: VideoTrack? = null)
+
+private class RoundOutline(var radius: Float) : ViewOutlineProvider() {
+    override fun getOutline(view: View, outline: Outline) {
+        if (view.width == 0 || view.height == 0) return
+        outline.setRoundRect(0, 0, view.width, view.height, radius)
+    }
+}
+
+private fun TextureViewRenderer.applyCorners(radiusPx: Float) {
+    if (radiusPx <= 0f) {
+        clipToOutline = false
+        return
+    }
+    val existing = outlineProvider as? RoundOutline
+    if (existing == null) {
+        outlineProvider = RoundOutline(radiusPx)
+    } else {
+        existing.radius = radiusPx
+    }
+    clipToOutline = true
+    invalidateOutline()
 }

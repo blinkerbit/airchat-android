@@ -15,8 +15,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.emoji2.emojipicker.EmojiPickerView
-import com.aird.chat.data.EmojiPreferences
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -37,7 +35,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -46,9 +43,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EmojiEmotions
@@ -62,7 +58,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.Alignment
@@ -82,6 +77,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
@@ -91,6 +89,7 @@ import androidx.core.widget.doAfterTextChanged
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.aird.chat.data.ChatRepository
+import com.aird.chat.data.CollabRepository
 import com.aird.session.Session
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.PressIconButton
@@ -107,7 +106,11 @@ fun Composer(
     reply: String,
     onClearReply: () -> Unit,
     uploading: Boolean,
-    onAttach: () -> Unit,
+    onPhotos: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onRecordVideo: () -> Unit,
+    onPickDevice: () -> Unit,
+    onPickAird: () -> Unit,
     onSend: () -> Unit,
     onContent: (Uri, String, Boolean) -> Unit,
     members: List<String> = emptyList(),
@@ -172,6 +175,7 @@ fun Composer(
             recordStartedAt = SystemClock.elapsedRealtime()
             elapsed = 0
             recording = true
+            if (panel.isNotEmpty()) onPanel("")
         } catch (_: Exception) {
             runCatching { created?.release() }
             recorder = null
@@ -367,7 +371,7 @@ fun Composer(
     val panelState = rememberUpdatedState(panel)
     val panelSink = rememberUpdatedState(onPanel)
 
-    BackHandler(enabled = panel == "emoji") {
+    BackHandler(enabled = panel == "emoji" || panel == "plus") {
         onPanel("")
     }
 
@@ -470,6 +474,10 @@ fun Composer(
             }
         }
 
+        val refs by CollabRepository.refs.collectAsState()
+        val shelfFor by CollabRepository.shelfFor.collectAsState()
+        if (shelfFor == activeId && refs.isNotEmpty()) CollabShelf(refs)
+
         val canSend = draft.isNotBlank() && !uploading
         val voiceMode = when {
             recording -> 1
@@ -555,12 +563,20 @@ fun Composer(
         ) {
             IconButton(
                 onClick = {
-                    keyboardController?.hide()
-                    onAttach()
+                    if (panel == "plus") {
+                        onPanel("")
+                        keyboardController?.show()
+                    } else {
+                        keyboardController?.hide()
+                        onPanel("plus")
+                    }
                 },
                 modifier = Modifier.size(40.dp)
             ) {
-                Icon(Icons.Default.AttachFile, contentDescription = "Attach")
+                Icon(
+                    if (panel == "plus") Icons.Default.Close else Icons.Default.Add,
+                    contentDescription = if (panel == "plus") "Close" else "More",
+                )
             }
             IconButton(
                 onClick = {
@@ -688,59 +704,56 @@ fun Composer(
         }
         }
 
+        val density = LocalDensity.current
+        val imePx = WindowInsets.ime.getBottom(density)
+        var keyboardPx by remember { mutableIntStateOf(0) }
+        if (imePx > 0) keyboardPx = imePx
+        val emojiHeight = with(density) {
+            val fallback = 320.dp.roundToPx()
+            val chosen = if (keyboardPx > 0) keyboardPx else fallback
+            chosen.coerceIn(280.dp.roundToPx(), 400.dp.roundToPx()).toDp()
+        }
         AnimatedVisibility(
-            visible = panel == "emoji",
-            enter = expandVertically(tween(220)) + fadeIn(tween(200)),
-            exit = shrinkVertically(tween(200)) + fadeOut(tween(180)),
+            visible = panel == "plus" && voiceMode == 0,
+            enter = if (reduced) EnterTransition.None else expandVertically(tween(220)) + fadeIn(tween(200)),
+            exit = if (reduced) ExitTransition.None else shrinkVertically(tween(200)) + fadeOut(tween(180)),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(280.dp)
-            ) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx -> EmojiPickerView(ctx) },
-                    update = { view ->
-                        view.setOnEmojiPickedListener { item ->
-                            val chosen = EmojiPreferences.applySkinTone(item.emoji, view.context)
-                            draftSink.value(draftState.value + chosen)
-                        }
-                    },
-                )
-                Surface(
-                    onClick = {
-                        draftSink.value(deleteLastEmojiOrChar(draftState.value))
-                    },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(bottom = 12.dp, end = 12.dp)
-                        .size(42.dp),
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f),
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                    shadowElevation = 4.dp,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Backspace,
-                            contentDescription = "Delete emoji",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
+            PlusPanel(
+                onClose = { onPanel("") },
+                onPhotos = onPhotos,
+                onTakePhoto = onTakePhoto,
+                onRecordVideo = onRecordVideo,
+                onPickDevice = onPickDevice,
+                onPickAird = onPickAird,
+                onToken = { token ->
+                    val base = draftState.value.trimEnd()
+                    val next = if (base.isEmpty()) "$token " else "$base $token "
+                    caretRequest = next to next.length
+                    draftSink.value(next)
+                },
+            )
+        }
+        AnimatedVisibility(
+            visible = panel == "emoji" && voiceMode == 0,
+            enter = if (reduced) EnterTransition.None else expandVertically(tween(220)) + fadeIn(tween(200)),
+            exit = if (reduced) ExitTransition.None else shrinkVertically(tween(200)) + fadeOut(tween(180)),
+        ) {
+            EmojiPanel(
+                modifier = Modifier.fillMaxWidth().height(emojiHeight),
+                showBackspace = true,
+                onBackspace = {
+                    val (next, caret) = deleteBeforeCursor(draftState.value, cursor)
+                    caretRequest = next to caret
+                    draftSink.value(next)
+                },
+                onPick = { emoji ->
+                    val (next, caret) = insertAtCursor(draftState.value, cursor, emoji)
+                    caretRequest = next to caret
+                    draftSink.value(next)
+                },
+            )
         }
     }
-}
-
-private fun deleteLastEmojiOrChar(text: String): String {
-    if (text.isEmpty()) return ""
-    val length = text.length
-    val codePoint = text.codePointBefore(length)
-    val count = Character.charCount(codePoint)
-    return text.substring(0, length - count)
 }
 
 private class ComposerField(context: Context) : EditText(context) {

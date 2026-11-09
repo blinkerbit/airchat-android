@@ -93,6 +93,10 @@ data class ChatMessage(
     val reactions: List<Reaction> = emptyList(),
     val forwarded: Boolean = false,
     val edited: Boolean = false,
+    val msgType: String = "text",
+    val cardKind: String = "",
+    val cardId: String = "",
+    val cardTitle: String = "",
 ) {
     fun clock(): String = formatMessageTime(createdAt)
 
@@ -103,8 +107,14 @@ data class ChatMessage(
     }
 
     fun previewLabel(): String {
-        val text = body.trim()
-        if (text.isNotEmpty() && !text.equals("Encrypted message", true)) return text
+        if (cardKind.isNotBlank()) {
+            val prefix = collabKindLabel(cardKind)
+            return if (cardTitle.isBlank()) prefix else "$prefix: $cardTitle"
+        }
+        if (!body.equals("Encrypted message", true)) {
+            val text = previewText(body)
+            if (text.isNotEmpty()) return text
+        }
         val att = attachments.firstOrNull() ?: return "Message"
         val gif = att.mediaKind == "gif" || att.name.endsWith(".gif", true)
         if (gif) return att.name.ifBlank { "GIF" }

@@ -5,6 +5,8 @@ import android.content.Context
 object EmojiPreferences {
     private const val PREFS = "aird_emoji_prefs"
     private const val KEY_SKIN_TONE = "default_skin_tone"
+    private const val KEY_RECENT = "recent"
+    private const val RECENT_SEP = "\u001F"
 
     data class SkinOption(val id: String, val label: String, val preview: String, val modifier: String)
 
@@ -27,6 +29,22 @@ object EmojiPreferences {
         "👴", "👵", "👮", "👷", "💂", "🕵", "🤶", "🧑‍🎄", "🎅", "🙅", "🙆", "🙇", "🙋",
         "🙌", "💆", "💇", "🚶", "🧍", "🧎", "🏃", "💃", "🕺", "🧖", "🧗", "🛌", "🛀"
     )
+
+    fun recent(context: Context): List<String> {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_RECENT, "").orEmpty()
+        if (raw.isEmpty()) return emptyList()
+        return raw.split(RECENT_SEP).filter { it.isNotEmpty() }.take(8)
+    }
+
+    fun remember(context: Context, emoji: String) {
+        val picked = emoji.trim()
+        if (picked.isEmpty()) return
+        val next = listOf(picked) + recent(context).filterNot { it == picked }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_RECENT, next.take(16).joinToString(RECENT_SEP))
+            .apply()
+    }
 
     fun getSkinTone(context: Context): String {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

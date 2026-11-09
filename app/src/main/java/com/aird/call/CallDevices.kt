@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.twilio.audioswitch.AudioDevice
+import io.livekit.android.audio.AudioSwitchHandler
 import io.livekit.android.room.Room
 import livekit.org.webrtc.Camera2Enumerator
 import livekit.org.webrtc.audio.JavaAudioDeviceModule
@@ -98,6 +99,20 @@ object CallDevices {
         routeGeneration++
     }
 
+    /** Set before the room connects. Voice stays on the earpiece. Video starts on the speaker. */
+    fun prepareRouter(room: Room?, speakerDefault: Boolean) {
+        val handler = room?.audioSwitchHandler as? AudioSwitchHandler ?: return
+        handler.forceHandleAudioRouting = true
+        val earpiece = AudioDevice.Earpiece::class.java
+        val speaker = AudioDevice.Speakerphone::class.java
+        val handsFree = listOf(AudioDevice.BluetoothHeadset::class.java, AudioDevice.WiredHeadset::class.java)
+        handler.preferredDeviceList = if (speakerDefault) {
+            handsFree + speaker + earpiece
+        } else {
+            handsFree + earpiece + speaker
+        }
+    }
+
     fun applyOutput(context: Context, room: Room?, output: String) {
         val choice = audioOutputs(context, room).firstOrNull { it.id == output }
             ?: audioOutputs(context, room).firstOrNull { outputKey(it) == output }
@@ -108,14 +123,13 @@ object CallDevices {
     fun selectAudioOutput(context: Context, room: Room?, choice: DeviceChoice) {
         val audio = context.getSystemService(AudioManager::class.java) ?: return
         val gen = ++routeGeneration
-        selectSwitchByLabel(room, switchLabel(choice))
         val apply = Runnable {
             if (gen != routeGeneration) return@Runnable
+            selectSwitchByLabel(room, switchLabel(choice))
             route(audio, choice)
         }
         if (Looper.myLooper() == Looper.getMainLooper()) apply.run() else main.post(apply)
-        main.postDelayed(apply, 300)
-        main.postDelayed(apply, 800)
+        main.postDelayed(apply, 400)
     }
 
     fun playback(context: Context, room: Room?): List<DeviceChoice> = audioOutputs(context, room)
@@ -164,27 +178,27 @@ object CallDevices {
     private fun route(audio: AudioManager, choice: DeviceChoice) {
         val route = routeOf(choice)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = route == Route.Speaker
         if (route != Route.Headset) {
             @Suppress("DEPRECATION")
             audio.stopBluetoothSco()
             @Suppress("DEPRECATION")
             audio.isBluetoothScoOn = false
         }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            if (route == Route.Headset && (choice.id.startsWith("bt:") || choice.label.contains("Bluetooth", true))) {
-                @Suppress("DEPRECATION")
-                audio.startBluetoothSco()
-                @Suppress("DEPRECATION")
-                audio.isBluetoothScoOn = true
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val listed = audio.availableCommunicationDevices
+            val exactId = choice.id.substringAfter("comm:", "").toIntOrNull()
+            val target = listed.firstOrNull { it.id == exactId } ?: listed.firstOrNull { matches(it, route) }
+            if (target != null && audio.setCommunicationDevice(target)) return
+            audio.clearCommunicationDevice()
+        } else if (route == Route.Headset && (choice.id.startsWith("bt:") || choice.label.contains("Bluetooth", true))) {
+            @Suppress("DEPRECATION")
+            audio.startBluetoothSco()
+            @Suppress("DEPRECATION")
+            audio.isBluetoothScoOn = true
             return
         }
-        val listed = audio.availableCommunicationDevices
-        val exactId = choice.id.substringAfter("comm:", "").toIntOrNull()
-        val target = listed.firstOrNull { it.id == exactId } ?: listed.firstOrNull { matches(it, route) }
-        if (target != null) audio.setCommunicationDevice(target)
+        @Suppress("DEPRECATION")
+        audio.isSpeakerphoneOn = route == Route.Speaker
     }
 
     private fun matches(dev: AudioDeviceInfo, route: Route): Boolean {
