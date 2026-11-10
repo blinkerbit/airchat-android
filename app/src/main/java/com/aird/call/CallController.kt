@@ -344,15 +344,17 @@ object CallController {
         if (meetId.isBlank() || _snapshot.value.phase != CallPhase.Idle) return false
         app = context.applicationContext
         val started = generation
+        val route = CallDevices.defaultOutput(context, video = true)
+        val routeKey = CallDevices.outputKey(route)
         _snapshot.value = CallSnapshot(
             phase = CallPhase.Joining,
             peer = title.ifBlank { "Meeting" },
             mode = "video",
             status = "Joining…",
-            speaker = true,
+            speaker = routeKey == "speaker",
             cameraOn = true,
-            output = "speaker",
-            playbackId = "speaker",
+            output = routeKey,
+            playbackId = route.id,
             meet = true,
         )
         scope.launch {
@@ -388,16 +390,18 @@ object CallController {
         app = context.applicationContext
         if (_snapshot.value.phase != CallPhase.Idle) return
         val startedIn = generation
+        val route = CallDevices.defaultOutput(context, video = mode == "video")
+        val routeKey = CallDevices.outputKey(route)
         _snapshot.value = CallSnapshot(
             phase = CallPhase.Outgoing,
             conversationId = conversationId,
             peer = peer,
             mode = mode,
             status = "Calling…",
-            speaker = mode == "video",
+            speaker = routeKey == "speaker",
             cameraOn = mode == "video",
-            output = if (mode == "video") "speaker" else "earpiece",
-            playbackId = if (mode == "video") "speaker" else "earpiece",
+            output = routeKey,
+            playbackId = route.id,
         )
         AirdTelecom.reportOutgoing(context, peer, mode == "video")
         scope.launch {
@@ -530,15 +534,18 @@ object CallController {
     }
 
     fun toggleSpeaker(context: Context) {
-        val currentIsSpeaker = _snapshot.value.speaker || _snapshot.value.output == "speaker"
-        val next = if (currentIsSpeaker) "earpiece" else "speaker"
-        val choice = CallDevices.audioOutputs(context, room).firstOrNull { CallDevices.outputKey(it) == next }
-            ?: DeviceChoice(next, next.replaceFirstChar { it.uppercase() })
-        chooseOutput(context, choice)
+        val outputs = CallDevices.audioOutputs(context, room)
+        val onSpeaker = _snapshot.value.output == "speaker"
+        val next = if (onSpeaker) {
+            outputs.firstOrNull { CallDevices.outputKey(it) == "earpiece" }
+                ?: outputs.firstOrNull { CallDevices.outputKey(it) == "headset" }
+        } else {
+            outputs.firstOrNull { CallDevices.outputKey(it) == "speaker" }
+        } ?: return
+        chooseOutput(context, next)
     }
 
-    fun chooseOutput(context: Context, choice: DeviceChoice) {
-        CallDevices.selectAudioOutput(context, room, choice)
+    private fun showRoute(context: Context, choice: DeviceChoice) {
         val key = CallDevices.outputKey(choice)
         val gen = ++routeHintGeneration
         _snapshot.value = _snapshot.value.copy(
@@ -552,6 +559,11 @@ object CallController {
             delay(1500)
             if (routeHintGeneration == gen) _snapshot.value = _snapshot.value.copy(routeHint = "")
         }
+    }
+
+    fun chooseOutput(context: Context, choice: DeviceChoice) {
+        CallDevices.selectAudioOutput(context, room, choice)
+        showRoute(context, choice)
     }
 
     fun setCallMode(context: Context, video: Boolean) {
@@ -571,9 +583,12 @@ object CallController {
         }
         if (current.mode == mode && current.cameraOn == cameraOn) return
         var next = current.copy(mode = mode, cameraOn = cameraOn)
-        if (video) {
-            next = next.copy(speaker = true, output = "speaker", playbackId = "speaker")
-            CallDevices.applyOutput(context, room, "speaker")
+        CallDevices.noteCallVideo(video)
+        if (video && current.output != "headset") {
+            val choice = CallDevices.defaultOutput(context, video = true)
+            CallDevices.play(context, room, choice, lock = false)
+            val key = CallDevices.outputKey(choice)
+            next = next.copy(speaker = key == "speaker", output = key, playbackId = choice.id)
         }
         if (!video) next = next.copy(sharing = false)
         val hint = if (video) "Video call" else "Voice call"
@@ -748,6 +763,14 @@ object CallController {
         val next = LiveKit.create(context.applicationContext)
         CallDevices.prepareRouter(next, speakerDefault = video)
         room = next
+        CallDevices.onRouteChanged = { choice -> showRoute(context, choice) }
+        val routed = CallDevices.begin(context, next, video)
+        val routedKey = CallDevices.outputKey(routed)
+        _snapshot.value = _snapshot.value.copy(
+            speaker = routedKey == "speaker",
+            output = routedKey,
+            playbackId = routed.id,
+        )
         events?.cancel()
         events = scope.launch {
             next.events.collect { event -> if (gen == generation) onRoomEvent(context, event) }
@@ -800,7 +823,7 @@ object CallController {
                 if (_snapshot.value.routeHint == hint) _snapshot.value = _snapshot.value.copy(routeHint = "")
             }
         }
-        CallDevices.applyOutput(context, next, playback)
+        CallDevices.reapply(context, next)
         AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video, cameraOn)
         syncLocalVideo(next, cameraOn)
         watchLocalVideo(next, gen)
@@ -813,10 +836,7 @@ object CallController {
                 val track = event.track
                 if (track is VideoTrack && event.publication.source != Track.Source.SCREEN_SHARE) _remoteVideo.value = track
                 if (track is VideoTrack && event.publication.source == Track.Source.SCREEN_SHARE) _remoteVideo.value = track
-                if (event.publication.kind == Track.Kind.AUDIO) {
-                    val playback = _snapshot.value.playbackId.ifEmpty { _snapshot.value.output }
-                    if (playback.isNotEmpty()) CallDevices.applyOutput(context, room, playback)
-                }
+                if (event.publication.kind == Track.Kind.AUDIO) CallDevices.reapply(context, room)
                 markConnected(context)
             }
             is RoomEvent.ParticipantConnected -> {
@@ -839,10 +859,7 @@ object CallController {
                 markConnected(context)
             }
             is RoomEvent.TrackPublished -> {
-                if (event.publication.kind == Track.Kind.AUDIO) {
-                    val playback = _snapshot.value.playbackId.ifEmpty { _snapshot.value.output }
-                    if (playback.isNotEmpty()) CallDevices.applyOutput(context, room, playback)
-                }
+                if (event.publication.kind == Track.Kind.AUDIO) CallDevices.reapply(context, room)
                 if (event.participant != room?.localParticipant) return
                 val track = event.publication.track as? VideoTrack ?: return
                 if (event.publication.source == Track.Source.SCREEN_SHARE) _screenVideo.value = track
@@ -984,8 +1001,7 @@ object CallController {
                     active.localParticipant.setCameraEnabled(true)
                     syncLocalVideo(active, true)
                 }
-                val playback = current.playbackId.ifEmpty { current.output }
-                if (playback.isNotEmpty()) CallDevices.applyOutput(context, active, playback)
+                CallDevices.reapply(context, active)
             } catch (err: Exception) {
                 if (err is kotlinx.coroutines.CancellationException) throw err
             }
@@ -1031,7 +1047,8 @@ object CallController {
         mediaToken = ""
         _pipClose.value = _pipClose.value + 1
         _backgroundOnly.value = false
-        CallDevices.cancelRoutes()
+        CallDevices.onRouteChanged = null
+        CallDevices.release(context)
         AirdTelecom.end(telecomCause)
         releaseProximity()
         generation += 1
@@ -1060,10 +1077,6 @@ object CallController {
         dismiss(context, current.conversationId)
         ProjectionService.stop(context)
         AirdConnectionService.showIdle(context)
-        val audio = context.getSystemService(AudioManager::class.java)
-        audio.mode = AudioManager.MODE_NORMAL
-        @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = false
         if (shade != null) shade(context, shade, current.peer, current.conversationId)
         if (message.isEmpty()) {
             _snapshot.value = CallSnapshot()

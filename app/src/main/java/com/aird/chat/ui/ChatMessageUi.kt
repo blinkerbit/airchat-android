@@ -203,6 +203,37 @@ private fun ChatMessage.sticker(): Boolean {
     return text in Stickers || text.none { it.isLetterOrDigit() }
 }
 
+@Composable
+private fun MissedCallNote(message: ChatMessage, onDelete: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(999.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f))
+                .padding(start = 12.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                message.body.ifBlank { "Missed call" },
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Delete missed call",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageRow(
@@ -228,6 +259,10 @@ fun MessageRow(
     onSelect: (() -> Unit)? = null,
     onStartSelect: (() -> Unit)? = null,
 ) {
+    if (message.msgType == "missed") {
+        MissedCallNote(message, onDelete)
+        return
+    }
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val reduced = LocalAirdReducedMotion.current

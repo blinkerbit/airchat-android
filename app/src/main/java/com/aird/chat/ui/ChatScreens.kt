@@ -25,6 +25,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -48,6 +49,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
@@ -109,6 +111,8 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.Color
@@ -149,6 +153,41 @@ import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.PressIconButton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+@Composable
+private fun SearchRollBar(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    onClose: () -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(60)
+        focus.requestFocus()
+    }
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(start = 4.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close search")
+            }
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                placeholder = { Text(placeholder) },
+                modifier = Modifier.weight(1f).focusRequester(focus),
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -218,6 +257,12 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         searchActive = true
     }
     BackHandler(enabled = active.isNotEmpty() && !overlay) { model.back() }
+    BackHandler(enabled = (searchActive || chatSearchActive) && !overlay) {
+        searchActive = false
+        searchQuery = ""
+        chatSearchActive = false
+        chatSearchQuery = ""
+    }
     LaunchedEffect(active, wide) {
         sheet = false
         menu = false
@@ -240,53 +285,34 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.statusBars,
         topBar = {
-            TopAppBar(
+            val roll = when {
+                searchActive && (active.isEmpty() || wide) -> "home"
+                active.isNotEmpty() && chatSearchActive -> "thread"
+                else -> "bar"
+            }
+            val reducedBar = LocalAirdReducedMotion.current
+            AnimatedContent(
+                targetState = roll,
+                transitionSpec = {
+                    if (reducedBar) {
+                        fadeIn(tween(80)) togetherWith fadeOut(tween(80))
+                    } else if (targetState == "bar") {
+                        (fadeIn(tween(200)) + slideInHorizontally(tween(280)) { -it / 5 }) togetherWith
+                            (fadeOut(tween(180)) + slideOutHorizontally(tween(300)) { it })
+                    } else {
+                        (fadeIn(tween(160)) + slideInHorizontally(tween(320)) { it }) togetherWith
+                            (fadeOut(tween(160)) + slideOutHorizontally(tween(260)) { -it / 5 })
+                    }
+                },
+                label = "searchRoll",
+            ) { state ->
+            if (state == "bar") TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onSurface,
                 ),
                 title = {
-                    if (searchActive && (active.isEmpty() || wide)) {
-                        OutlinedTextField(
-                            value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            placeholder = { Text("Search conversations…") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            shape = RoundedCornerShape(24.dp),
-                            trailingIcon = {
-                                IconButton(onClick = {
-                                    searchActive = false
-                                    searchQuery = ""
-                                }) {
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = "Close search",
-                                    )
-                                }
-                            },
-                        )
-                    } else if (active.isNotEmpty() && chatSearchActive) {
-                        OutlinedTextField(
-                            value = chatSearchQuery,
-                            onValueChange = { chatSearchQuery = it },
-                            placeholder = { Text("Search messages…") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            shape = RoundedCornerShape(24.dp),
-                            trailingIcon = {
-                                IconButton(onClick = {
-                                    chatSearchActive = false
-                                    chatSearchQuery = ""
-                                }) {
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = "Close search",
-                                    )
-                                }
-                            },
-                        )
-                    } else if (active.isEmpty()) {
+                    if (active.isEmpty()) {
                         Text("Aird Chat", fontWeight = FontWeight.Bold)
                     } else {
                         Box(Modifier.clickable(enabled = openChat?.kind == "group") { if (openChat?.kind == "group") groupInfo = true }) {
@@ -432,6 +458,21 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                     }
                 },
             )
+            else SearchRollBar(
+                value = if (state == "home") searchQuery else chatSearchQuery,
+                onValueChange = { if (state == "home") searchQuery = it else chatSearchQuery = it },
+                placeholder = if (state == "home") "Search conversations…" else "Search messages…",
+                onClose = {
+                    if (state == "home") {
+                        searchActive = false
+                        searchQuery = ""
+                    } else {
+                        chatSearchActive = false
+                        chatSearchQuery = ""
+                    }
+                },
+            )
+            }
         },
     ) { padding ->
         Column(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize().background(MaterialTheme.colorScheme.background)) {

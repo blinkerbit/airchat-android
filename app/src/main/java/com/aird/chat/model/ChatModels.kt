@@ -107,6 +107,7 @@ data class ChatMessage(
     }
 
     fun previewLabel(): String {
+        if (msgType == "missed") return body.ifBlank { "Missed call" }
         if (cardKind.isNotBlank()) {
             val prefix = collabKindLabel(cardKind)
             return if (cardTitle.isBlank()) prefix else "$prefix: $cardTitle"

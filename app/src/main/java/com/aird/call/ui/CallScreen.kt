@@ -84,6 +84,7 @@ import com.aird.MainActivity
 import com.aird.call.CallController
 import com.aird.call.CallDevices
 import com.aird.call.CallPhase
+import com.aird.call.DeviceChoice
 import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.track.VideoTrack
 import com.aird.ui.LocalAirdReducedMotion
@@ -256,7 +257,7 @@ fun CallScreen() {
                     } else {
                         CallButton(CallGlass, if (call.muted) Icons.Default.MicOff else Icons.Default.Mic, "Mute", CallController::toggleMute)
                         Box {
-                            val audioChoices = remember(call.output) { CallDevices.audioOutputs(context, CallController.room()) }
+                            var audioChoices by remember { mutableStateOf(emptyList<DeviceChoice>()) }
                             val audioIcon = when (call.output) {
                                 "speaker" -> Icons.AutoMirrored.Filled.VolumeUp
                                 "headset" -> Icons.Default.Headphones
@@ -268,8 +269,9 @@ fun CallScreen() {
                                 else -> "Earpiece"
                             }
                             CallButton(CallGlass, audioIcon, audioName) {
+                                audioChoices = CallDevices.audioOutputs(context, CallController.room())
                                 val hasHeadset = audioChoices.any { CallDevices.outputKey(it) == "headset" }
-                                if (hasHeadset) {
+                                if (hasHeadset || audioChoices.size > 2) {
                                     menu = if (menu == "audio") "" else "audio"
                                 } else {
                                     CallController.toggleSpeaker(context)
