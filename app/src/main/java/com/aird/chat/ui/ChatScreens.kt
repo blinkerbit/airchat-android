@@ -1228,7 +1228,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
         val info = listState.layoutInfo
         if (info.totalItemsCount == 0) return true
         val last = info.visibleItemsInfo.lastOrNull() ?: return false
-        return last.index >= info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 64
+        return last.index >= info.totalItemsCount - 1
     }
 
     LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, searching) {
@@ -1260,8 +1260,9 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
         refs.count { (it.kind == "list" || it.kind == "poll") && it.active && shelfFor == conversationId }
     }
     LaunchedEffect(openShelfCount) {
-        if (placed && followBottom && !searching) {
-            delay(120)
+        if (placed && !searching) {
+            followBottom = true
+            delay(60)
             revealEnd()
         }
     }
@@ -1275,10 +1276,11 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                 previous = index
                 return@collect
             }
-            if (touched && index < previous) followBottom = false
-            if (!moving && touched && !finger) {
-                followBottom = end
-                touched = false
+            if (finger && index < previous) {
+                followBottom = false
+            }
+            if (!moving && !finger && end) {
+                followBottom = true
             }
             previous = index
         }
