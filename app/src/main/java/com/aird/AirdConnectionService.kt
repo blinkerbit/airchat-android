@@ -174,6 +174,7 @@ class AirdConnectionService : Service() {
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 250, 250, 250)
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setAllowBubbles(true)
             },
         )
         manager.createNotificationChannel(

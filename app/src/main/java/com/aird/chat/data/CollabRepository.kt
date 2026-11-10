@@ -502,7 +502,13 @@ object CollabRepository {
             }
             publish(parse(kind, response.json()))
         } catch (err: Exception) {
-            if (err is CancellationException) throw err
+            if (err is CancellationException) {
+                editSlots { map ->
+                    val slot = map[key] ?: return@editSlots
+                    if (slot.artifact == null) map.remove(key) else map[key] = slot.copy(loading = false)
+                }
+                throw err
+            }
             fail(key, "Could not load", existing?.artifact)
         }
     }
@@ -513,15 +519,13 @@ object CollabRepository {
         val response = AirdHttp.get(context, "/api/chat/collab-suggest?kind=$kind&q=$query")
         if (!response.ok) return null
         val items = response.json().optJSONArray("items") ?: return null
-        var fallback = ""
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
             val id = item.optString("id")
             if (id.isBlank()) continue
-            if (fallback.isBlank()) fallback = id
             if (item.optString("slug").equals(slug, true)) return id
         }
-        return fallback
+        return null
     }
 
     private suspend fun act(current: CollabArtifact, block: suspend () -> CollabArtifact) {

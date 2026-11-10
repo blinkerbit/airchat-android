@@ -18,11 +18,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -67,6 +73,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.sp
 import com.aird.chat.data.ChatRepository
 import com.aird.chat.data.CollabException
@@ -195,6 +202,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
     val moving = lists.firstOrNull { it.id == movingId }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.ime),
         topBar = {
             TopAppBar(
                 title = {
@@ -706,9 +714,10 @@ private fun GroupNameDialog(onDismiss: () -> Unit, onCreate: (String) -> Unit) {
     var name by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("New group") },
         text = {
-            Column {
+            Column(Modifier.imePadding().navigationBarsPadding()) {
                 Text("A group is a folder on this phone's account. It does not change who can open the list.", fontSize = 13.sp)
                 OutlinedTextField(name, { name = it }, modifier = Modifier.padding(top = 8.dp), placeholder = { Text("Home") })
             }
@@ -799,9 +808,13 @@ private fun ListCreateDialog(
     var groupId by remember { mutableStateOf(if (folder == "none") "" else folder) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("New list") },
         text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                Modifier.imePadding().navigationBarsPadding().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedTextField(title, { title = it }, placeholder = { Text("Title") })
                 OutlinedTextField(notes, { notes = it }, placeholder = { Text("Description") })
                 TextButton(onClick = { checklist = !checklist }) { Text(if (checklist) "To-do" else "Notes") }
@@ -832,9 +845,13 @@ private fun ListEditDialog(list: ListArtifact, onDismiss: () -> Unit, onSave: (S
     val mine = list.organizer.equals(Session.username.value, true)
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("Edit list") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                Modifier.imePadding().navigationBarsPadding().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 if (!mine) Text("Only the owner can change the title.", fontSize = 13.sp)
                 OutlinedTextField(title, { title = it }, enabled = mine, placeholder = { Text("Title") })
                 OutlinedTextField(notes, { notes = it }, enabled = mine, placeholder = { Text("Description") })
@@ -856,9 +873,10 @@ private fun ItemEditDialog(item: ListEntry, onDismiss: () -> Unit, onSave: (Stri
     var due by remember(item.id) { mutableStateOf(item.dueAt) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("Edit item") },
         text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+            Column(Modifier.imePadding().navigationBarsPadding().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                 OutlinedTextField(text, { text = it }, placeholder = { Text("Item") })
                 OutlinedTextField(notes, { notes = it }, modifier = Modifier.padding(top = 8.dp), placeholder = { Text("Note") })
                 TextButton(onClick = { pickDateTime(context) { due = it } }) {

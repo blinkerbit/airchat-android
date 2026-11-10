@@ -10,6 +10,8 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import androidx.core.app.RemoteInput
@@ -17,7 +19,9 @@ import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.aird.AirdConnectionService
+import com.aird.ChatBubbleActivity
 import com.aird.MainActivity
+import com.aird.chat.model.Conversation
 import com.aird.MarkAsReadReceiver
 import com.aird.NotificationReplyReceiver
 import com.aird.R
@@ -82,7 +86,55 @@ object ChatNotifier {
             saveMeta(context, conversationId, Meta(title, sender, group, messageId))
             list.toList()
         }
-        publish(context, conversationId, title, sender, group, messageId, alert, notes)
+        publish(context, conversationId, title, sender, group, messageId, alert, notes, expand = false)
+    }
+
+    fun showBubble(context: Context, conversation: Conversation) {
+        val app = context.applicationContext
+        if (conversation.id.isEmpty()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Toast.makeText(app, "Chat bubbles need Android 11", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val allowed = app.getSystemService(NotificationManager::class.java)?.areBubblesAllowed() == true
+            if (!allowed) {
+                val settings = Intent(Settings.ACTION_APP_NOTIFICATION_BUBBLE_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, app.packageName)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    context.startActivity(settings)
+                } catch (_: Exception) {
+                    Toast.makeText(app, "Allow chat bubbles for Aird in notification settings", Toast.LENGTH_LONG).show()
+                }
+                return
+            }
+        }
+        val notes = synchronized(gate) {
+            notes(app, conversation.id).toList().ifEmpty {
+                listOf(
+                    Note(
+                        messageId = "",
+                        sender = conversation.name(),
+                        text = conversation.preview.ifBlank { "Chat" },
+                        at = System.currentTimeMillis(),
+                        mine = false,
+                    ),
+                )
+            }
+        }
+        publish(
+            app,
+            conversation.id,
+            conversation.name(),
+            conversation.peer.ifEmpty { conversation.name() },
+            conversation.kind == "group",
+            notes.last().messageId,
+            alert = false,
+            notes = notes,
+            expand = true,
+        )
     }
 
     fun attachMedia(context: Context, conversationId: String, messageId: String, uri: Uri, mime: String) {
@@ -100,7 +152,7 @@ object ChatNotifier {
             list.toList()
         }
         val meta = synchronized(gate) { loadMeta(context, conversationId) } ?: return
-        publish(context, conversationId, meta.title, meta.sender, meta.group, meta.messageId, false, notes)
+        publish(context, conversationId, meta.title, meta.sender, meta.group, meta.messageId, false, notes, expand = false)
     }
 
     fun cancel(context: Context, conversationId: String) {
@@ -232,6 +284,7 @@ object ChatNotifier {
         messageId: String,
         alert: Boolean,
         notes: List<Note>,
+        expand: Boolean,
     ) {
         val app = context.applicationContext
         val label = title.ifEmpty { sender.ifEmpty { "Aird Chat" } }
@@ -257,6 +310,18 @@ object ChatNotifier {
             conversationId.hashCode(),
             open,
             PendingIntent.FLAG_UPDATE_CURRENT or mutableFlag(),
+        )
+        val bubbleOpen = Intent(app, ChatBubbleActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            flags = Intent.FLAG_ACTIVITY_NEW_DOCUMENT or Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+            putExtra("conversation_id", conversationId)
+            data = Uri.parse("aird://bubble/$conversationId")
+        }
+        val bubblePending = PendingIntent.getActivity(
+            app,
+            ("bubble:$conversationId").hashCode(),
+            bubbleOpen,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val reply = RemoteInput.Builder(NotificationReplyReceiver.KEY_TEXT_REPLY)
             .setLabel("Reply")
@@ -303,7 +368,7 @@ object ChatNotifier {
             .addAction(replyAction)
             .addAction(android.R.drawable.ic_menu_view, "Mark read", readPending)
             .addPerson(conversation)
-        publishShortcut(app, conversationId, label, icon, open, content, builder)
+        publishShortcut(app, conversationId, label, icon, open, bubblePending, builder, expand)
         app.getSystemService(NotificationManager::class.java).notify(conversationId.hashCode(), builder.build())
     }
 
@@ -336,6 +401,7 @@ object ChatNotifier {
         open: Intent,
         bubbleIntent: PendingIntent,
         builder: NotificationCompat.Builder,
+        autoExpand: Boolean,
     ) {
         try {
             val existing = ShortcutManagerCompat.getDynamicShortcuts(context)
@@ -355,7 +421,7 @@ object ChatNotifier {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val bubble = NotificationCompat.BubbleMetadata.Builder(bubbleIntent, icon)
                     .setDesiredHeight(600)
-                    .setAutoExpandBubble(false)
+                    .setAutoExpandBubble(autoExpand)
                     .setSuppressNotification(false)
                     .build()
                 builder.setBubbleMetadata(bubble)

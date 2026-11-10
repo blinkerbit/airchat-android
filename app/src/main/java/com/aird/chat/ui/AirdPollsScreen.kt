@@ -6,7 +6,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -36,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import com.aird.chat.data.CollabRepository
 import com.aird.chat.model.PollArtifact
 import com.aird.chat.model.PollDraft
@@ -187,9 +193,10 @@ private fun PollCreateDialog(onDismiss: () -> Unit, onCreate: (String, List<Stri
     var multi by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("New poll") },
         text = {
-            Column {
+            Column(Modifier.imePadding().navigationBarsPadding().heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                 OutlinedTextField(question, { question = it }, placeholder = { Text("Question") })
                 OutlinedTextField(options, { options = it }, placeholder = { Text("One option per line") })
                 TextButton(onClick = { multi = !multi }) { Text(if (multi) "Several choices" else "One choice") }

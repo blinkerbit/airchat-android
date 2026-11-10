@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -95,23 +96,25 @@ fun CollabShelf(refs: List<CollabRef>) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(refs, key = { "${it.kind}:${it.id}" }) { ref ->
-            val label = collabKindLabel(ref.kind)
-            val name = ref.title.ifBlank { ref.token }
-            val text = if (ref.active) "$label  $name" else "$label  $name · ${collabInactiveLabel(ref.kind)}"
-            Text(
-                text,
+            val name = ref.title.ifBlank { ref.token.ifBlank { if (ref.kind == "poll") "Poll" else "List" } }
+            val kind = if (ref.kind == "poll") "Poll" else "List"
+            Row(
                 modifier = Modifier
-                    .alpha(if (ref.active) 1f else 0.45f)
                     .widthIn(max = 220.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(MaterialTheme.colorScheme.surface)
                     .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(999.dp))
                     .clickable { CollabRepository.open(ref.kind, ref.id, ref.slug) }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontSize = 13.sp,
-            )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "$kind  $name",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 13.sp,
+                )
+            }
         }
     }
 }
@@ -132,6 +135,7 @@ private fun CollabFocusSheetBody(kind: String, id: String, slug: String) {
             Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
+                .imePadding()
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 28.dp),
@@ -188,13 +192,17 @@ private fun CollabSurface(
         }
         val me by Session.username.collectAsState()
         val mine = artifact.organizer.equals(me, true)
+        val frozen = !expanded && !artifact.active && (artifact is PollArtifact || artifact is MeetArtifact)
         Text(collabKindLabel(artifact.type).uppercase(), color = accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Text(artifact.heading.ifBlank { fallback }, color = fg, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Text(artifact.meta(), color = muted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 6.dp))
+        if (frozen) {
+            Text(if (artifact is MeetArtifact) "Ended" else "Closed", color = muted, fontSize = 12.sp)
+        }
         when (artifact) {
-            is PollArtifact -> PollBody(artifact, slot, fg, accent, onPrimary)
+            is PollArtifact -> PollBody(artifact, slot, fg, accent, onPrimary, locked = frozen)
             is ListArtifact -> ListBody(artifact, slot, expanded, fg, accent, onPrimary)
-            is MeetArtifact -> MeetBody(artifact, fg, accent, onPrimary)
+            is MeetArtifact -> MeetBody(artifact, fg, accent, onPrimary, locked = frozen)
         }
         if (expanded && artifact.slug.isNotBlank()) {
             val context = LocalContext.current
@@ -205,7 +213,7 @@ private fun CollabSurface(
         if (expanded && mine) {
             TextButton(onClick = { editing = true }) { Text("Edit") }
         }
-        if (!expanded) {
+        if (!expanded && !frozen) {
             Text(
                 "Full view",
                 color = accent,
@@ -234,7 +242,7 @@ private fun rememberCollab(kind: String, id: String, slug: String, force: Boolea
 }
 
 @Composable
-private fun PollBody(poll: PollArtifact, slot: CollabSlot, fg: Color, accent: Color, onPrimary: Boolean) {
+private fun PollBody(poll: PollArtifact, slot: CollabSlot, fg: Color, accent: Color, onPrimary: Boolean, locked: Boolean = false) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val mineKey = poll.options.joinToString { "${it.id}:${it.mine}:${it.votes}" }
@@ -254,7 +262,7 @@ private fun PollBody(poll: PollArtifact, slot: CollabSlot, fg: Color, accent: Co
                 .clip(RoundedCornerShape(10.dp))
                 .background(track)
                 .border(1.dp, if (selected) accent else Color.Transparent, RoundedCornerShape(10.dp))
-                .clickable(enabled = !slot.busy && poll.active) {
+                .clickable(enabled = !locked && !slot.busy && poll.active) {
                     if (poll.allowMulti) {
                         picked = if (option.id in picked) picked - option.id else picked + option.id
                         hint = ""
@@ -284,7 +292,7 @@ private fun PollBody(poll: PollArtifact, slot: CollabSlot, fg: Color, accent: Co
                     scope.collab { CollabRepository.vote(context, poll, picked.toList()) }
                 }
             },
-            enabled = !slot.busy && poll.active,
+            enabled = !locked && !slot.busy && poll.active,
         ) { Text("Save vote", color = accent) }
     }
 }
@@ -427,27 +435,29 @@ private fun ItemEditor(item: ListEntry, onDismiss: () -> Unit, onSave: (String, 
 }
 
 @Composable
-private fun MeetBody(meet: MeetArtifact, fg: Color, accent: Color, onPrimary: Boolean) {
+private fun MeetBody(meet: MeetArtifact, fg: Color, accent: Color, onPrimary: Boolean, locked: Boolean = false) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var copied by remember(meet.id) { mutableStateOf("") }
     var confirmEnd by remember(meet.id) { mutableStateOf(false) }
     val me by Session.username.collectAsState()
-    if (meet.live) {
+    if (meet.live && !locked) {
         MeetJoinButton(meet, onPrimary)
-    } else {
+    } else if (!meet.live) {
         Text("This meeting has ended.", color = fg.copy(alpha = 0.75f), fontSize = 13.sp)
     }
-    Row {
-        TextButton(onClick = {
-            val path = meet.joinPath.ifBlank { "/meet/${meet.slug}" }
-            copyText(context, "Meeting link", AirdHttp.absolute(context, path))
-            copied = "Link copied"
-        }) { Text("Copy link", color = accent) }
-    }
-    if (copied.isNotBlank()) Text(copied, color = fg.copy(alpha = 0.7f), fontSize = 12.sp)
-    if (meet.organizer.equals(me, true) && meet.live) {
-        TextButton(onClick = { confirmEnd = true }) { Text("End meeting", color = MaterialTheme.colorScheme.error) }
+    if (!locked) {
+        Row {
+            TextButton(onClick = {
+                val path = meet.joinPath.ifBlank { "/meet/${meet.slug}" }
+                copyText(context, "Meeting link", AirdHttp.absolute(context, path))
+                copied = "Link copied"
+            }) { Text("Copy link", color = accent) }
+        }
+        if (copied.isNotBlank()) Text(copied, color = fg.copy(alpha = 0.7f), fontSize = 12.sp)
+        if (meet.organizer.equals(me, true) && meet.live) {
+            TextButton(onClick = { confirmEnd = true }) { Text("End meeting", color = MaterialTheme.colorScheme.error) }
+        }
     }
     if (confirmEnd) {
         AlertDialog(

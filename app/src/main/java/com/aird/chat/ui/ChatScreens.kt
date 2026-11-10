@@ -30,6 +30,8 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -43,10 +45,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -54,13 +58,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import com.aird.chat.data.CollabRepository
 import com.aird.chat.data.ConversationPrefs
 import com.aird.chat.data.DraftStore
 import com.aird.chat.model.formatDateHeader
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,7 +95,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -103,13 +106,24 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -124,9 +138,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.IntOffset
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -137,6 +154,8 @@ import com.aird.AppLock
 import com.aird.MainActivity
 import com.aird.call.CallController
 import com.aird.call.CallPhase
+import com.aird.AirdConnectionService
+import com.aird.chat.data.ChatNotifier
 import com.aird.chat.data.ChatRepository
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
@@ -152,6 +171,7 @@ import com.aird.theme.ThemeStore
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.PressIconButton
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @Composable
@@ -228,6 +248,19 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     val openChat = conversations.firstOrNull { it.id == active }
     val wide = LocalConfiguration.current.screenWidthDp >= 720
     val overlay = files || lists || polls || search || shared || keys || enhanced || settings
+    val density = LocalDensity.current
+    var homeOrigin by remember { mutableStateOf(Offset.Zero) }
+    var lift by remember { mutableStateOf<BubbleLift?>(null) }
+    fun onListDrag(id: String, root: Offset, phase: BubblePhase) {
+        when (phase) {
+            BubblePhase.Hold, BubblePhase.Move -> lift = BubbleLift(id, root)
+            BubblePhase.Cancel -> lift = null
+            BubblePhase.Drop -> {
+                lift = null
+                conversations.firstOrNull { it.id == id }?.let { ChatNotifier.showBubble(context, it) }
+            }
+        }
+    }
 
     LaunchedEffect(Unit) { model.refresh() }
     DisposableEffect(Unit) {
@@ -280,7 +313,9 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(
+        Modifier.fillMaxSize().onGloballyPositioned { homeOrigin = it.positionInRoot() },
+    ) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.statusBars,
@@ -503,6 +538,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         searchQuery,
                         selectedId = active,
                         modifier = Modifier.weight(0.38f).fillMaxHeight(),
+                        onBubbleDrag = { id, root, phase -> onListDrag(id, root, phase) },
                     )
                     Box(Modifier.weight(0.62f).fillMaxHeight()) {
                         if (active.isEmpty()) {
@@ -531,7 +567,14 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                     },
                     label = "conversation",
                 ) { showList ->
-                    if (showList) ConversationList(conversations, model, searchQuery) else Thread(model, openChat, chatSearchQuery)
+                    if (showList) {
+                        ConversationList(
+                            conversations,
+                            model,
+                            searchQuery,
+                            onBubbleDrag = { id, root, phase -> onListDrag(id, root, phase) },
+                        )
+                    } else Thread(model, openChat, chatSearchQuery)
                 }
             }
         }
@@ -631,6 +674,21 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     BackHandler(enabled = keys) { keys = false }
     BackHandler(enabled = enhanced) { enhanced = false }
     BackHandler(enabled = settings) { settings = false }
+    lift?.let { drag ->
+        val conversation = conversations.firstOrNull { it.id == drag.id }
+        if (conversation != null) {
+            val local = drag.root - homeOrigin
+            val half = with(density) { 32.dp.toPx() }
+            Box(
+                Modifier
+                    .offset { IntOffset((local.x - half).roundToInt(), (local.y - half).roundToInt()) }
+                    .size(64.dp)
+                    .graphicsLayer { alpha = 0.92f },
+            ) {
+                Avatar(conversation.name(), 64, isOnline = conversation.online)
+            }
+        }
+    }
     }
 }
 
@@ -811,6 +869,10 @@ private fun CallButtons(conversationId: String, peer: String) {
     PressIconButton(onClick = { place("video") }) { Icon(Icons.Default.Videocam, contentDescription = "Video call") }
 }
 
+private enum class BubblePhase { Hold, Move, Drop, Cancel }
+
+private data class BubbleLift(val id: String, val root: Offset)
+
 @Composable
 private fun ConversationList(
     items: List<Conversation>,
@@ -818,6 +880,7 @@ private fun ConversationList(
     query: String = "",
     selectedId: String = "",
     modifier: Modifier = Modifier.fillMaxSize(),
+    onBubbleDrag: (String, Offset, BubblePhase) -> Unit = { _, _, _ -> },
 ) {
     val q = query.trim()
     val shown = filterConversations(items, q)
@@ -840,6 +903,10 @@ private fun ConversationList(
             items(shown, key = { it.id }) { conversation ->
                 val unread = conversation.unread > 0
                 val isOnline = conversation.online
+                val haptic = LocalHapticFeedback.current
+                var rowOrigin by remember(conversation.id) { mutableStateOf(Offset.Zero) }
+                val drag by rememberUpdatedState(onBubbleDrag)
+                val origin by rememberUpdatedState(rowOrigin)
                 Surface(
                     onClick = { model.open(conversation.id) },
                     shape = RoundedCornerShape(16.dp),
@@ -848,7 +915,62 @@ private fun ConversationList(
                         unread -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                         else -> Color.Transparent
                     },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned { rowOrigin = it.positionInRoot() }
+                        .pointerInput(conversation.id) {
+                            val slop = viewConfiguration.touchSlop
+                            val timeout = viewConfiguration.longPressTimeoutMillis
+                            val liftDistance = 28.dp.toPx()
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                val pointerId = down.id
+                                var local = down.position
+                                var mode = "wait"
+                                try {
+                                    withTimeout(timeout) {
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            val change = event.changes.firstOrNull { it.id == pointerId }
+                                            if (change == null || change.isConsumed) {
+                                                mode = "scroll"
+                                                return@withTimeout
+                                            }
+                                            if (!change.pressed) {
+                                                mode = "tap"
+                                                return@withTimeout
+                                            }
+                                            val delta = change.positionChange()
+                                            local += delta
+                                            if (abs(local.x - down.position.x) > slop || abs(local.y - down.position.y) > slop) {
+                                                mode = "scroll"
+                                                return@withTimeout
+                                            }
+                                        }
+                                    }
+                                } catch (_: PointerEventTimeoutCancellationException) {
+                                    mode = "hold"
+                                }
+                                if (mode != "hold") return@awaitEachGesture
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                val held = origin + local
+                                drag(conversation.id, held, BubblePhase.Hold)
+                                var moved = false
+                                var root = held
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                    if (!change.pressed) break
+                                    val delta = change.positionChange()
+                                    change.consume()
+                                    local += delta
+                                    root = origin + local
+                                    if (!moved && (root - held).getDistance() > liftDistance) moved = true
+                                    if (moved) drag(conversation.id, root, BubblePhase.Move)
+                                }
+                                drag(conversation.id, root, if (moved) BubblePhase.Drop else BubblePhase.Cancel)
+                            }
+                        },
                 ) {
                     Row(
                         Modifier
@@ -951,6 +1073,40 @@ private object ChatScrollStore {
     }
 }
 
+@Composable
+fun ChatBubbleHost(conversationId: String) {
+    val context = LocalContext.current
+    val model: ChatViewModel = viewModel()
+    var signedIn by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(conversationId) {
+        val ok = Session.probe(context)
+        signedIn = ok
+        if (!ok || conversationId.isEmpty()) return@LaunchedEffect
+        try {
+            AirdConnectionService.start(context)
+            ChatRepository.prepare(context)
+            model.open(conversationId)
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: Exception) {
+        }
+    }
+    when (signedIn) {
+        null -> Box(Modifier.fillMaxSize())
+        false -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Open Aird to sign in")
+        }
+        true -> {
+            val conversations by model.conversations.collectAsState()
+            val conversation = conversations.firstOrNull { it.id == conversationId }
+                ?: Conversation(conversationId, "", "", "", 0, "")
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                Thread(model, conversation)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuery: String = "") {
@@ -962,20 +1118,12 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     val me by Session.username.collectAsState()
 
     val conversationId = conversation?.id.orEmpty()
-    val initialIndex = remember(conversationId) {
+    val listState = remember(conversationId) {
         val saved = ChatScrollStore.get(conversationId)
-        if (saved != null && saved.index < messages.size) saved.index
-        else (messages.lastIndex).coerceAtLeast(0)
+        val index = if (saved != null && saved.index < messages.size) saved.index else messages.lastIndex.coerceAtLeast(0)
+        val offset = if (saved != null && saved.index < messages.size) saved.offset else 0
+        LazyListState(index, offset)
     }
-    val initialOffset = remember(conversationId) {
-        val saved = ChatScrollStore.get(conversationId)
-        if (saved != null && saved.index < messages.size) saved.offset else 0
-    }
-
-    val listState = rememberLazyListState(
-        initialFirstVisibleItemIndex = initialIndex,
-        initialFirstVisibleItemScrollOffset = initialOffset,
-    )
     var draft by remember(conversationId) { mutableStateOf(DraftStore.get(conversationId)) }
     LaunchedEffect(draft, conversationId) {
         DraftStore.set(conversationId, draft)
@@ -1000,8 +1148,6 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     var picking by remember { mutableStateOf(false) }
     var saveTarget by remember { mutableStateOf<Pair<ChatMessage, List<ChatAttachment>>?>(null) }
     var pinCursor by remember(conversation?.id) { mutableStateOf(0) }
-    val density = LocalDensity.current
-    val ime = WindowInsets.ime.getBottom(density)
     fun sendUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val caption = draft.trim()
@@ -1048,43 +1194,138 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
     }
     val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
-    val showScrollToBottom by remember {
-        derivedStateOf {
-            val total = listState.layoutInfo.totalItemsCount
-            if (total == 0) false
-            else {
-                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                lastVisible < total - 3
-            }
-        }
-    }
     val loadingMore by model.loadingMore.collectAsState()
     val hasMore by model.hasMore.collectAsState()
-    var initialScrollDone by remember(conversationId) { mutableStateOf(false) }
+    var followBottom by remember(conversationId) { mutableStateOf(true) }
+    var placed by remember(conversationId) { mutableStateOf(false) }
+    var searched by remember(conversationId) { mutableStateOf(false) }
+    var listHeight by remember(conversationId) { mutableIntStateOf(0) }
+    var finger by remember(conversationId) { mutableStateOf(false) }
+    var touched by remember(conversationId) { mutableStateOf(false) }
+    val scrolling = remember(conversationId) { mutableIntStateOf(0) }
+    val searching = searchQuery.isNotBlank()
 
     val entering = enteringMessageIds(conversationId, messages)
 
-    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
-        if (conversationId.isNotEmpty() && listState.layoutInfo.totalItemsCount > 0) {
-            ChatScrollStore.save(
-                conversationId,
-                listState.firstVisibleItemIndex,
-                listState.firstVisibleItemScrollOffset,
-            )
+    suspend fun revealEnd() {
+        val count = listState.layoutInfo.totalItemsCount
+        if (count == 0) return
+        val last = count - 1
+        scrolling.intValue += 1
+        try {
+            listState.scrollToItem(last)
+            val item = listState.layoutInfo.visibleItemsInfo.lastOrNull { it.index == last }
+            if (item != null) {
+                val overflow = item.offset + item.size - listState.layoutInfo.viewportEndOffset
+                if (overflow > 0) listState.scrollToItem(last, overflow)
+            }
+        } finally {
+            scrolling.intValue -= 1
         }
     }
 
-    LaunchedEffect(listState.firstVisibleItemIndex) {
-        if (listState.firstVisibleItemIndex <= 2 && hasMore && !loadingMore && messages.isNotEmpty()) {
-            val prevIndex = listState.firstVisibleItemIndex
-            val prevOffset = listState.firstVisibleItemScrollOffset
-            model.loadMore { addedCount ->
-                if (addedCount > 0) {
-                    coroutineScope.launch {
-                        listState.scrollToItem(prevIndex + addedCount, prevOffset)
-                    }
+    fun atEnd(): Boolean {
+        val info = listState.layoutInfo
+        if (info.totalItemsCount == 0) return true
+        val last = info.visibleItemsInfo.lastOrNull() ?: return false
+        return last.index >= info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 64
+    }
+
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, searching) {
+        if (searching || conversationId.isEmpty() || listState.layoutInfo.totalItemsCount == 0 || scrolling.intValue > 0) return@LaunchedEffect
+        ChatScrollStore.save(
+            conversationId,
+            listState.firstVisibleItemIndex,
+            listState.firstVisibleItemScrollOffset,
+        )
+    }
+
+    LaunchedEffect(conversationId, messages.isNotEmpty()) {
+        if (placed || messages.isEmpty() || searching) return@LaunchedEffect
+        placed = true
+        val saved = ChatScrollStore.get(conversationId)
+        val end = saved == null || saved.index >= messages.lastIndex
+        followBottom = end
+        if (end) revealEnd() else listState.scrollToItem(saved.index.coerceAtMost(messages.lastIndex), saved.offset)
+    }
+
+    LaunchedEffect(messages.lastOrNull()?.id, messages.size, followBottom, searching) {
+        if (!placed || !followBottom || searching || messages.isEmpty()) return@LaunchedEffect
+        revealEnd()
+    }
+
+    val refs by CollabRepository.refs.collectAsState()
+    val shelfFor by CollabRepository.shelfFor.collectAsState()
+    val openShelfCount = remember(refs, shelfFor, conversationId) {
+        refs.count { (it.kind == "list" || it.kind == "poll") && it.active && shelfFor == conversationId }
+    }
+    LaunchedEffect(openShelfCount) {
+        if (placed && followBottom && !searching) {
+            delay(120)
+            revealEnd()
+        }
+    }
+
+    LaunchedEffect(listState, conversationId) {
+        var previous = listState.firstVisibleItemIndex
+        snapshotFlow {
+            Triple(listState.isScrollInProgress, listState.firstVisibleItemIndex, atEnd())
+        }.collect { (moving, index, end) ->
+            if (searchQuery.isNotBlank() || scrolling.intValue > 0) {
+                previous = index
+                return@collect
+            }
+            if (touched && index < previous) followBottom = false
+            if (!moving && touched && !finger) {
+                followBottom = end
+                touched = false
+            }
+            previous = index
+        }
+    }
+
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.isNotBlank()) {
+            searched = true
+            followBottom = false
+            return@LaunchedEffect
+        }
+        if (!searched || !placed) return@LaunchedEffect
+        searched = false
+        val saved = ChatScrollStore.get(conversationId)
+        if (saved != null && saved.index < messages.size) {
+            followBottom = saved.index >= messages.lastIndex
+            listState.scrollToItem(saved.index, saved.offset)
+        }
+    }
+
+    LaunchedEffect(conversationId, hasMore, searching) {
+        var guard = 0
+        while (guard < 30 && !searching && hasMore) {
+            snapshotFlow { listState.firstVisibleItemIndex }.first { index ->
+                searchQuery.isNotBlank() || (index <= 2 && model.hasMore.value && !model.loadingMore.value && model.messages.value.isNotEmpty())
+            }
+            if (searchQuery.isNotBlank() || !model.hasMore.value) break
+            val anchorIndex = listState.firstVisibleItemIndex
+            val anchor = filteredMessages.getOrNull(anchorIndex)
+                ?: model.messages.value.firstOrNull { it.msgType != "sync" && !it.pending }
+            val anchorId = anchor?.id ?: break
+            val offset = listState.firstVisibleItemScrollOffset
+            val added = suspendCancellableCoroutine { cont ->
+                model.loadMore { count -> if (cont.isActive) cont.resume(count) }
+            }
+            guard += 1
+            if (added <= 0) break
+            val newIndex = model.messages.value.indexOfFirst { it.id == anchorId }
+            if (newIndex >= 0) {
+                scrolling.intValue += 1
+                try {
+                    listState.scrollToItem(newIndex, offset)
+                } finally {
+                    scrolling.intValue -= 1
                 }
             }
+            if (listState.firstVisibleItemIndex > 2) break
         }
     }
 
@@ -1117,24 +1358,6 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
         }
     }
 
-    LaunchedEffect(conversationId, messages.size, ime) {
-        if (messages.isEmpty()) return@LaunchedEffect
-        if (!initialScrollDone) {
-            initialScrollDone = true
-            val saved = ChatScrollStore.get(conversationId)
-            if (saved != null && saved.index < messages.size) {
-                listState.scrollToItem(saved.index, saved.offset)
-            } else {
-                listState.scrollToItem(messages.lastIndex)
-            }
-        } else {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: messages.lastIndex
-            val nearEnd = lastVisible >= messages.lastIndex - 2
-            if (nearEnd) {
-                listState.scrollToItem(messages.lastIndex)
-            }
-        }
-    }
     Column(
         Modifier
             .fillMaxSize()
@@ -1225,27 +1448,41 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                 }
             }
         }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clipToBounds()
+                .onSizeChanged { size ->
+                    val next = size.height
+                    val previous = listHeight
+                    listHeight = next
+                    if (next == previous || !followBottom || searching || finger) return@onSizeChanged
+                    coroutineScope.launch {
+                        revealEnd()
+                    }
+                },
+        ) {
             LazyColumn(
-                Modifier.fillMaxSize(),
+                Modifier.fillMaxSize().pointerInput(conversationId) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        finger = true
+                        touched = true
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.none { it.pressed }) break
+                            }
+                        } finally {
+                            finger = false
+                        }
+                    }
+                },
                 state = listState,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (loadingMore) {
-                    item(key = "loading_more_progress") {
-                        Box(
-                            Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                    }
-                }
                 if (searchQuery.isNotBlank() && filteredMessages.isEmpty()) {
                     item(key = "empty_search_result") {
                         Box(
@@ -1304,7 +1541,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                         onSave = { files -> saveTarget = message to files },
                         onRetry = { model.retry(message) },
                         pinned = pins.any { it.messageId == message.id },
-                        enter = message.id in entering,
+                        enter = searchQuery.isBlank() && message.msgType != "sync" && message.id in entering,
                         selected = message.id in selectedIds,
                         onSelect = if (selecting || selectedIds.isNotEmpty()) {
                             {
@@ -1321,18 +1558,36 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                     )
                 }
             }
-            if (showScrollToBottom) {
-                SmallFloatingActionButton(
-                    onClick = {
-                        coroutineScope.launch {
-                            if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
-                        }
-                    },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            if (loadingMore && searchQuery.isBlank()) {
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).size(22.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            val showEnd = !followBottom && searchQuery.isBlank() && messages.isNotEmpty()
+            val endAlpha by animateFloatAsState(if (showEnd) 1f else 0f, tween(160), label = "end")
+            if (endAlpha > 0.01f) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .graphicsLayer { alpha = endAlpha }
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .clickable(enabled = showEnd) {
+                            followBottom = true
+                            coroutineScope.launch { revealEnd() }
+                        },
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Scroll to bottom")
+                    Icon(
+                        Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Scroll to bottom",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
                 }
             }
         }
@@ -1355,6 +1610,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
             else -> {
                 val typingStatus by model.typing.collectAsState()
                 val isTyping = typingStatus.isNotEmpty() && typingStatus != me
+                Column(Modifier.fillMaxWidth()) {
                 AnimatedVisibility(
                     visible = isTyping,
                     enter = fadeIn(tween(150)),
@@ -1431,6 +1687,7 @@ private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuer
                     model.attach(listOf(uri), caption, replyId, if (voice) "voice" else null)
                 },
             )
+                }
             }
         }
     }
@@ -1916,7 +2173,11 @@ private fun enteringMessageIds(conversationId: String, messages: List<ChatMessag
                 removedPending.none { old -> old.mine == msg.mine && old.body == msg.body && old.sender == msg.sender }
         }
         val historyFill = gate.previous.isEmpty() && fresh.none { it.pending }
-        if (fresh.isEmpty() || fresh.size > 3 || historyFill) emptySet() else fresh.map { it.id }.toSet()
+        val tail = fresh.all { msg ->
+            val last = gate.previous.lastOrNull { it.msgType != "sync" } ?: return@all true
+            msg.createdAt >= last.createdAt
+        }
+        if (fresh.isEmpty() || fresh.size > 3 || historyFill || !tail || fresh.any { it.msgType == "sync" }) emptySet() else fresh.map { it.id }.toSet()
     }
     SideEffect {
         if (switched) {

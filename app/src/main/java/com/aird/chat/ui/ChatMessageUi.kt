@@ -67,16 +67,26 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -144,6 +154,8 @@ private object VoiceNoteController {
         if (activeKey.value == key) activeKey.value = null
     }
 }
+
+internal fun chatImageLoader(context: Context): ImageLoader = ChatImages.loader(context)
 
 private object ChatImages {
     @Volatile private var loader: ImageLoader? = null
@@ -263,6 +275,14 @@ fun MessageRow(
         MissedCallNote(message, onDelete)
         return
     }
+    if (message.msgType == "sync") {
+        LinearProgressIndicator(
+            Modifier.fillMaxWidth().padding(horizontal = 48.dp, vertical = 8.dp).height(2.dp),
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
+        return
+    }
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val reduced = LocalAirdReducedMotion.current
@@ -333,6 +353,7 @@ fun MessageRow(
             if (!mine) {
                 Text(message.sender, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 2.dp))
             }
+            val bubbleGestures = remember(message.id) { BubbleGestures() }
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -341,6 +362,8 @@ fun MessageRow(
                         messageId = message.id,
                         reduced = reduced,
                         failed = message.failed,
+                        selecting = onSelect != null,
+                        space = bubbleGestures,
                         onLongPress = {
                             if (onSelect != null) {
                                 onSelect()
@@ -357,6 +380,7 @@ fun MessageRow(
                             }
                         },
                         onRetry = onRetry,
+                        onSelectTap = { onSelect?.invoke() },
                         onDrag = { dragX = it },
                         onRelease = { offset, trigger ->
                             if (trigger) onReply()
@@ -372,24 +396,26 @@ fun MessageRow(
                     ),
                 contentAlignment = if (mine) Alignment.CenterEnd else Alignment.CenterStart,
             ) {
-                if (message.sticker()) {
-                    Text(
-                        message.body.trim(),
-                        fontSize = 52.sp,
-                    )
-                } else {
-                    Bubble(
-                        message = message,
-                        quoteMessage = quoteMessage,
-                        quoteText = quoteText,
-                        mine = mine,
-                        highlighted = highlighted,
-                        onQuoteClick = onQuoteClick,
-                        onOpen = { viewer = it },
-                        onFile = { attachment ->
-                            scope.launch { downloadChatAttachment(context, message.id, attachment) }
-                        },
-                    )
+                CompositionLocalProvider(LocalBubbleGestures provides bubbleGestures) {
+                    if (message.sticker()) {
+                        Text(
+                            message.body.trim(),
+                            fontSize = 52.sp,
+                        )
+                    } else {
+                        Bubble(
+                            message = message,
+                            quoteMessage = quoteMessage,
+                            quoteText = quoteText,
+                            mine = mine,
+                            highlighted = highlighted,
+                            onQuoteClick = onQuoteClick,
+                            onOpen = { viewer = it },
+                            onFile = { attachment ->
+                                scope.launch { downloadChatAttachment(context, message.id, attachment) }
+                            },
+                        )
+                    }
                 }
                 if (menu) {
                     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -968,6 +994,7 @@ private fun AttachmentImage(attachment: ChatAttachment, modifier: Modifier) {
     var isPlaying by remember(attachment.url) { mutableStateOf(false) }
 
     val url = AirdHttp.absolute(context, attachment.url)
+    var loading by remember(url) { mutableStateOf(false) }
     Box(modifier = modifier) {
         AsyncImage(
             model = ImageRequest.Builder(context)
@@ -980,8 +1007,18 @@ private fun AttachmentImage(attachment: ChatAttachment, modifier: Modifier) {
             imageLoader = if (isGif && isPlaying) ChatImages.loader(context) else ChatImages.staticLoader(context),
             contentDescription = attachment.name,
             contentScale = ContentScale.Crop,
+            onLoading = { loading = true },
+            onSuccess = { loading = false },
+            onError = { loading = false },
             modifier = Modifier.fillMaxSize(),
         )
+        if (loading) {
+            LinearProgressIndicator(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp),
+                color = Color.White.copy(alpha = 0.9f),
+                trackColor = Color.Transparent,
+            )
+        }
 
         if (isGif) {
             val control = Modifier
@@ -1025,6 +1062,7 @@ private fun MediaViewer(messageId: String, attachment: ChatAttachment, onDismiss
     var scale by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
     var panY by remember { mutableFloatStateOf(0f) }
+    var notice by remember { mutableStateOf("") }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             if (attachment.video()) {
@@ -1050,13 +1088,17 @@ private fun MediaViewer(messageId: String, attachment: ChatAttachment, onDismiss
                 )
             }
             val scope = rememberCoroutineScope()
-            Column(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+            Column(Modifier.align(Alignment.TopEnd).zIndex(1f).padding(12.dp)) {
                 Row {
                     Text(
                         "Download",
                         color = Color.White,
                         modifier = Modifier.clickable {
-                            scope.launch { downloadChatAttachment(context, messageId, attachment) }
+                            notice = ""
+                            scope.launch {
+                                val saved = downloadChatAttachment(context, messageId, attachment)
+                                notice = if (saved) "Saved to Downloads" else "Could not download this file"
+                            }
                         }.padding(12.dp),
                     )
                     Text(
@@ -1074,6 +1116,9 @@ private fun MediaViewer(messageId: String, attachment: ChatAttachment, onDismiss
                         }.padding(12.dp),
                     )
                     Text("Close", color = Color.White, modifier = Modifier.clickable(onClick = onDismiss).padding(12.dp))
+                }
+                if (notice.isNotEmpty()) {
+                    Text(notice, color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp))
                 }
                 AttachmentProgressBar(messageId, attachment.index, Color.White)
             }
@@ -1191,7 +1236,7 @@ private fun VoiceNoteBubble(
                     player.seekTo(positionMs)
                     scrubbing = false
                 },
-                modifier = Modifier.fillMaxWidth().height(20.dp),
+                modifier = Modifier.fillMaxWidth().height(20.dp).bubbleScrubber(),
                 colors = SliderDefaults.colors(
                     thumbColor = fg,
                     activeTrackColor = fg,
@@ -1314,94 +1359,130 @@ private fun buildMessageText(text: String, fg: Color, linkColor: Color): Annotat
     if (index < text.length) append(text.substring(index))
 }
 
-private enum class MessagePress { LongPress, Drag, Up, Scroll, Cancel }
+private enum class MessagePress { LongPress, Drag, Up, SelectTap, Scroll, Cancel }
+
+private class BubbleGestures {
+    private val zones = LinkedHashMap<Any, Rect>()
+
+    fun put(key: Any, rect: Rect) {
+        zones[key] = rect
+    }
+
+    fun remove(key: Any) {
+        zones.remove(key)
+    }
+
+    fun hits(point: Offset): Boolean = zones.values.any { point in it }
+}
+
+private val LocalBubbleGestures = staticCompositionLocalOf<BubbleGestures?> { null }
+
+private fun Modifier.bubbleScrubber(): Modifier = composed {
+    val space = LocalBubbleGestures.current ?: return@composed this
+    val key = remember { Any() }
+    DisposableEffect(key) {
+        onDispose { space.remove(key) }
+    }
+    onGloballyPositioned { space.put(key, it.boundsInRoot()) }
+}
 
 private fun Modifier.replySwipeGestures(
     messageId: String,
     reduced: Boolean,
     failed: Boolean,
+    selecting: Boolean,
+    space: BubbleGestures,
     onLongPress: () -> Unit,
     onLongPressEnd: () -> Unit,
     onRetry: () -> Unit,
+    onSelectTap: () -> Unit,
     onDrag: (Float) -> Unit,
     onRelease: (offset: Float, triggerReply: Boolean) -> Unit,
     onDragStart: () -> Unit,
-): Modifier = pointerInput(messageId, reduced, failed) {
-    val replyThreshold = 72.dp.toPx()
-    val maxDrag = 180.dp.toPx()
-    val touchSlop = viewConfiguration.touchSlop
-    val longPressTimeout = viewConfiguration.longPressTimeoutMillis
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Main)
-        val pointerId = down.id
-        var offsetX = 0f
-        var offsetY = 0f
-        var press = MessagePress.LongPress
-        try {
-            // Wake on the system long-press timeout. A still finger does not produce pointer events.
-            withTimeout(longPressTimeout) {
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Main)
-                    val change = event.changes.firstOrNull { it.id == pointerId }
-                    if (change == null || change.isConsumed) {
-                        press = MessagePress.Cancel
-                        return@withTimeout
-                    }
-                    if (!change.pressed) {
-                        press = MessagePress.Up
-                        return@withTimeout
-                    }
-                    val delta = change.positionChange()
-                    offsetX += delta.x
-                    offsetY += delta.y
-                    val absX = abs(offsetX)
-                    val absY = abs(offsetY)
-                    if (absX > touchSlop && absX > absY * 1.05f) {
-                        if (reduced) {
-                            press = MessagePress.Scroll
-                        } else {
-                            change.consume()
-                            press = MessagePress.Drag
+): Modifier = composed {
+    val origin = remember { mutableStateOf(Offset.Zero) }
+    onGloballyPositioned { origin.value = it.positionInRoot() }
+        .pointerInput(messageId, reduced, failed, selecting) {
+            val replyThreshold = 72.dp.toPx()
+            val maxDrag = 180.dp.toPx()
+            val touchSlop = viewConfiguration.touchSlop
+            val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                val pointerId = down.id
+                val onScrubber = space.hits(origin.value + down.position)
+                var offsetX = 0f
+                var offsetY = 0f
+                var press = MessagePress.LongPress
+                try {
+                    // The bubble sees the finger before play, vote, and seek controls.
+                    // A still finger claims the menu. A short tap is left for the control.
+                    withTimeout(longPressTimeout) {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == pointerId }
+                            if (change == null || change.isConsumed) {
+                                press = MessagePress.Cancel
+                                return@withTimeout
+                            }
+                            if (!change.pressed) {
+                                press = if (selecting) MessagePress.SelectTap else MessagePress.Up
+                                if (selecting) change.consume()
+                                return@withTimeout
+                            }
+                            val delta = change.positionChange()
+                            offsetX += delta.x
+                            offsetY += delta.y
+                            val absX = abs(offsetX)
+                            val absY = abs(offsetY)
+                            if (absX > touchSlop && absX > absY * 1.05f) {
+                                if (reduced || onScrubber) {
+                                    press = MessagePress.Scroll
+                                } else {
+                                    change.consume()
+                                    press = MessagePress.Drag
+                                }
+                                return@withTimeout
+                            }
+                            if (absY > touchSlop && absY >= absX) {
+                                press = MessagePress.Scroll
+                                return@withTimeout
+                            }
                         }
-                        return@withTimeout
                     }
-                    if (absY > touchSlop && absY >= absX) {
-                        press = MessagePress.Scroll
-                        return@withTimeout
+                } catch (_: PointerEventTimeoutCancellationException) {
+                    press = MessagePress.LongPress
+                }
+                when (press) {
+                    MessagePress.LongPress -> {
+                        onLongPress()
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                            change.consume()
+                            if (!change.pressed) break
+                        }
+                        onLongPressEnd()
                     }
+                    MessagePress.Drag -> {
+                        onDragStart()
+                        onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                            if (!change.pressed || change.isConsumed) break
+                            offsetX += change.positionChange().x
+                            change.consume()
+                            onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
+                        }
+                        onRelease(offsetX, abs(offsetX) > replyThreshold)
+                    }
+                    MessagePress.SelectTap -> onSelectTap()
+                    MessagePress.Up -> {
+                        if (failed && abs(offsetX) < touchSlop && abs(offsetY) < touchSlop) onRetry()
+                    }
+                    MessagePress.Scroll, MessagePress.Cancel -> Unit
                 }
             }
-        } catch (_: PointerEventTimeoutCancellationException) {
-            press = MessagePress.LongPress
         }
-        when (press) {
-            MessagePress.LongPress -> {
-                onLongPress()
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Main)
-                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                    change.consume()
-                    if (!change.pressed) break
-                }
-                onLongPressEnd()
-            }
-            MessagePress.Drag -> {
-                onDragStart()
-                onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Main)
-                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                    if (!change.pressed || change.isConsumed) break
-                    offsetX += change.positionChange().x
-                    change.consume()
-                    onDrag(offsetX.coerceIn(-maxDrag, maxDrag))
-                }
-                onRelease(offsetX, abs(offsetX) > replyThreshold)
-            }
-            MessagePress.Up -> {
-                if (failed && abs(offsetX) < touchSlop && abs(offsetY) < touchSlop) onRetry()
-            }
-            MessagePress.Scroll, MessagePress.Cancel -> Unit
-        }
-    }
 }

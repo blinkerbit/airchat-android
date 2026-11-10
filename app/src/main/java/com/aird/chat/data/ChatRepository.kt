@@ -341,12 +341,16 @@ object ChatRepository {
             return false
         }
         if (_activeId.value == conversationId) close()
+        threadCache.remove(conversationId)
+        ChatThreadStore.delete(context, Session.username.value, conversationId)
         _conversations.value = _conversations.value.filterNot { it.id == conversationId }
         ChatNotifier.cancel(context, conversationId)
         return true
     }
 
     fun clearLocalChat(conversationId: String) {
+        threadCache.remove(conversationId)
+        appContext?.let { ChatThreadStore.delete(it, Session.username.value, conversationId) }
         if (_activeId.value == conversationId) {
             _messages.value = emptyList()
         }
@@ -354,37 +358,244 @@ object ChatRepository {
 
     suspend fun open(context: Context, conversationId: String) {
         rememberApp(context)
-        _activeId.value = conversationId
-        _error.value = ""
-        _typing.value = ""
-        _hasMore.value = true
-        _loadingMore.value = false
-        touchConversation(context, conversationId, unread = 0)
-        ChatNotifier.cancel(context, conversationId)
-        val response = AirdHttp.get(context, "/api/chat/conversations/$conversationId/messages?limit=80")
-        if (!response.ok) {
-            _error.value = "Could not open this conversation"
+        val previous = _activeId.value
+        if (previous == conversationId && _messages.value.isNotEmpty()) {
+            touchConversation(context, conversationId, unread = 0)
+            ChatNotifier.cancel(context, conversationId)
+            refreshOpen(context, conversationId, mark = true)
             return
         }
-        val root = response.json()
-        val array = root.optJSONArray("messages")
-        val me = Session.username.value
-        val items = buildList {
-            if (array != null) {
-                for (i in 0 until array.length()) {
-                    val item = array.optJSONObject(i) ?: continue
-                    add(toMessage(context, item, me))
-                }
+        if (previous.isNotEmpty()) stashThread(previous)
+        _error.value = ""
+        _typing.value = ""
+        _loadingMore.value = false
+        if (!restoreThread(conversationId)) {
+            val stored = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ChatThreadStore.load(context, Session.username.value, conversationId)
+            }
+            if (stored == null) {
+                _messages.value = emptyList()
+                _receipts.value = emptyList()
+                _pins.value = emptyList()
+                _hasMore.value = true
+            } else {
+                _messages.value = stored.messages
+                _receipts.value = stored.receipts
+                _pins.value = stored.pins
+                _hasMore.value = stored.hasMore
             }
         }
-        _messages.value = items + outboxTail(context, conversationId, items)
+        _activeId.value = conversationId
+        touchConversation(context, conversationId, unread = 0)
+        ChatNotifier.cancel(context, conversationId)
+        refreshOpen(context, conversationId, mark = true)
+    }
+
+    private data class OpenThread(
+        val messages: List<ChatMessage>,
+        val receipts: List<ReadReceipt>,
+        val pins: List<ChatPin>,
+        val hasMore: Boolean,
+    )
+
+    private val threadCache = object : LinkedHashMap<String, OpenThread>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, OpenThread>?) = size > 8
+    }
+
+    private fun stashThread(conversationId: String) {
+        if (conversationId.isEmpty() || _activeId.value != conversationId) return
+        val rows = _messages.value
+        if (rows.isEmpty()) return
+        threadCache[conversationId] = OpenThread(rows, _receipts.value, _pins.value, _hasMore.value)
+        schedulePersist(conversationId)
+    }
+
+    private fun restoreThread(conversationId: String): Boolean {
+        val cached = threadCache[conversationId] ?: return false
+        _messages.value = cached.messages
+        _receipts.value = cached.receipts
+        _pins.value = cached.pins
+        _hasMore.value = cached.hasMore
+        return true
+    }
+
+    private var persistJob: kotlinx.coroutines.Job? = null
+
+    private fun schedulePersist(conversationId: String = _activeId.value) {
+        val ctx = appContext ?: return
+        val user = Session.username.value
+        if (conversationId.isEmpty() || user.isEmpty() || conversationId != _activeId.value) return
+        val messages = _messages.value
+        val receipts = _receipts.value
+        val pins = _pins.value
+        val more = _hasMore.value
+        persistJob?.cancel()
+        persistJob = scope.launch {
+            kotlinx.coroutines.delay(350)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ChatThreadStore.save(ctx, user, conversationId, messages, receipts, pins, more)
+            }
+        }
+    }
+
+    private suspend fun refreshOpen(context: Context, conversationId: String, mark: Boolean) {
+        val response = try {
+            AirdHttp.get(context, "/api/chat/conversations/$conversationId/messages?limit=80")
+        } catch (err: Exception) {
+            if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+            if (_messages.value.isEmpty()) _error.value = "Could not open this conversation"
+            return
+        }
+        if (conversationId != _activeId.value) return
+        if (!response.ok) {
+            if (_messages.value.isEmpty()) _error.value = "Could not open this conversation"
+            return
+        }
+        applyLatest(context, conversationId, response.json(), mark)
+    }
+
+    private suspend fun applyLatest(context: Context, convId: String, root: JSONObject, mark: Boolean) {
+        val array = root.optJSONArray("messages") ?: return
+        val me = Session.username.value
+        val fresh = buildList {
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                add(toMessage(context, item, me))
+            }
+        }
+        if (convId != _activeId.value) return
+        updateMessages { current ->
+            val ids = fresh.map { it.id }.toSet()
+            val first = fresh.firstOrNull()
+            val older = if (first == null) {
+                emptyList()
+            } else {
+                current.filter {
+                    !it.pending && !it.id.startsWith("local-") && it.id !in ids && it.createdAt < first.createdAt
+                }
+            }
+            val sending = current.filter { row ->
+                row.pending && fresh.none { it.mine && it.body.trim() == row.body.trim() }
+            }
+            val merged = older + fresh + sending
+            val kept = outboxTail(context, convId, fresh).filter { extra -> merged.none { it.id == extra.id } }
+            merged + kept
+        }
         _receipts.value = receiptsOf(root.optJSONArray("receipts"))
         _pins.value = pinsOf(root.optJSONArray("pins"))
-        if (items.any { it.e2e && !it.decryptOk }) {
-            AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", conversationId).toString())
+        if (fresh.any { it.e2e && !it.decryptOk }) {
+            AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", convId).toString())
         }
-        markRead(items.lastOrNull { !it.pending })
+        if (mark) markRead(fresh.lastOrNull { !it.pending })
+        stashThread(convId)
+        fillGaps(context, convId, fresh.map { it.id })
     }
+
+    private suspend fun fillGaps(context: Context, convId: String, freshIds: List<String>) {
+        val local = _messages.value.filter {
+            it.conversationId == convId && !it.pending && !it.id.startsWith("local-") && it.msgType != "sync"
+        }
+        if (local.size < 2 || local.map { it.id } == freshIds) return
+        val untilId = local.last().id
+        var sinceId = local.first().id
+        val confirmed = mutableSetOf<String>()
+        var pages = 0
+        var covered = false
+        while (pages < 4 && convId == _activeId.value) {
+            pages += 1
+            val response = try {
+                AirdHttp.get(
+                    context,
+                    "/api/chat/conversations/$convId/messages?index=1&since_id=${enc(sinceId)}&until_id=${enc(untilId)}&limit=400",
+                )
+            } catch (err: Exception) {
+                if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                return
+            }
+            if (!response.ok || convId != _activeId.value) return
+            val body = response.json()
+            val array = body.optJSONArray("ids") ?: return
+            val complete = body.optBoolean("complete", true)
+            val server = buildList {
+                for (i in 0 until array.length()) {
+                    val row = array.optJSONObject(i) ?: continue
+                    val id = row.optString("id")
+                    if (id.isNotEmpty()) add(id to row.optString("created_at"))
+                }
+            }
+            if (server.isEmpty()) return
+            confirmed.addAll(server.map { it.first })
+            val bodies = _messages.value.filter { it.msgType != "sync" }.map { it.id }.toSet()
+            val missing = server.filter { it.first !in bodies }
+            if (missing.isNotEmpty()) {
+                updateMessages { current ->
+                    val known = current.map { it.id }.toSet()
+                    val stubs = missing.filter { it.first !in known }.map { (id, at) ->
+                        ChatMessage(
+                            id = id,
+                            conversationId = convId,
+                            sender = "",
+                            body = "",
+                            createdAt = at,
+                            mine = false,
+                            msgType = "sync",
+                        )
+                    }
+                    insertByTime(current, stubs)
+                }
+                for (chunk in missing.chunked(40)) {
+                    if (convId != _activeId.value) return
+                    val got = try {
+                        AirdHttp.get(
+                            context,
+                            "/api/chat/conversations/$convId/messages?ids=${chunk.joinToString(",") { enc(it.first) }}",
+                        )
+                    } catch (err: Exception) {
+                        if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                        continue
+                    }
+                    if (!got.ok || convId != _activeId.value) continue
+                    val me = Session.username.value
+                    val items = got.json().optJSONArray("messages") ?: JSONArray()
+                    val full = buildList {
+                        for (i in 0 until items.length()) {
+                            val item = items.optJSONObject(i) ?: continue
+                            add(toMessage(context, item, me))
+                        }
+                    }
+                    val wanted = chunk.map { it.first }.toSet()
+                    val byId = full.associateBy { it.id }
+                    updateMessages { current ->
+                        current.mapNotNull { row ->
+                            when {
+                                row.id in byId -> byId.getValue(row.id)
+                                row.msgType == "sync" && row.id in wanted -> null
+                                else -> row
+                            }
+                        }
+                    }
+                }
+            }
+            covered = complete && pages == 1
+            if (complete) break
+            val next = server.last().first
+            if (next == sinceId || next == untilId) break
+            sinceId = next
+        }
+        if (covered && convId == _activeId.value) {
+            val earliest = local.first().createdAt
+            val latest = local.last().createdAt
+            updateMessages { current ->
+                current.filter { msg ->
+                    msg.pending || msg.id.startsWith("local-") || msg.id in confirmed ||
+                        msg.createdAt < earliest || msg.createdAt > latest
+                }.filterNot { it.msgType == "sync" && it.id in confirmed }
+            }
+        }
+        if (convId == _activeId.value) stashThread(convId)
+    }
+
+    private fun enc(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
 
     private val resyncing = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -416,30 +627,7 @@ object ChatRepository {
                 return
             }
             if (!response.ok || convId != _activeId.value) return
-            val root = response.json()
-            val array = root.optJSONArray("messages") ?: return
-            val me = Session.username.value
-            val fresh = buildList {
-                for (i in 0 until array.length()) {
-                    val item = array.optJSONObject(i) ?: continue
-                    add(toMessage(context, item, me))
-                }
-            }
-            if (convId != _activeId.value) return
-            updateMessages { current ->
-                val ids = fresh.map { it.id }.toSet()
-                val first = fresh.firstOrNull()
-                val older = if (first == null) emptyList() else current.filter {
-                    !it.pending && !it.id.startsWith("local-") && it.id !in ids && it.createdAt < first.createdAt
-                }
-                val sending = current.filter { row ->
-                    row.pending && fresh.none { it.mine && it.body.trim() == row.body.trim() }
-                }
-                older + fresh + sending
-            }
-            _receipts.value = receiptsOf(root.optJSONArray("receipts"))
-            _pins.value = pinsOf(root.optJSONArray("pins"))
-            if (AppForeground.resumed()) markRead(fresh.lastOrNull { !it.pending })
+            applyLatest(context, convId, response.json(), mark = AppForeground.resumed())
         } finally {
             resyncing.set(false)
         }
@@ -449,7 +637,9 @@ object ChatRepository {
         val convId = _activeId.value
         if (convId.isEmpty() || _loadingMore.value || !_hasMore.value) return 0
 
-        val oldest = _messages.value.firstOrNull { !it.pending && !it.id.startsWith("local-") } ?: return 0
+        val oldest = _messages.value.firstOrNull {
+            !it.pending && !it.id.startsWith("local-") && it.msgType != "sync"
+        } ?: return 0
 
         _loadingMore.value = true
         try {
@@ -482,6 +672,7 @@ object ChatRepository {
                         _hasMore.value = false
                         current
                     } else {
+                        if (array.length() < 50) _hasMore.value = false
                         filteredOlder + current
                     }
                 }
@@ -495,6 +686,8 @@ object ChatRepository {
     }
 
     fun close() {
+        val id = _activeId.value
+        stashThread(id)
         _activeId.value = ""
         _messages.value = emptyList()
         _receipts.value = emptyList()
@@ -563,7 +756,11 @@ object ChatRepository {
 
     fun clear() {
         unwatchNetwork()
-        appContext?.let { OutboxStore.clear(it) }
+        val user = Session.username.value
+        appContext?.let { ctx ->
+            OutboxStore.clear(ctx)
+            if (user.isNotEmpty()) ChatThreadStore.deleteUser(ctx, user)
+        }
         _conversations.value = emptyList()
         _messages.value = emptyList()
         _activeId.value = ""
@@ -2082,6 +2279,22 @@ object ChatRepository {
         synchronized(gate) {
             _messages.value = block(_messages.value)
         }
+        schedulePersist()
+    }
+
+    private fun insertByTime(current: List<ChatMessage>, extra: List<ChatMessage>): List<ChatMessage> {
+        if (extra.isEmpty()) return current
+        val next = current.toMutableList()
+        for (row in extra) {
+            if (next.any { it.id == row.id }) continue
+            val at = next.indexOfFirst { !it.pending && it.createdAt > row.createdAt }
+            if (at >= 0) next.add(at, row)
+            else {
+                val pendingAt = next.indexOfFirst { it.pending }
+                if (pendingAt < 0) next.add(row) else next.add(pendingAt, row)
+            }
+        }
+        return next
     }
 
     private fun strings(array: JSONArray?): List<String> {

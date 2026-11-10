@@ -103,6 +103,16 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <activity
+            android:name=".ChatBubbleActivity"
+            android:exported="false"
+            android:documentLaunchMode="always"
+            android:resizeableActivity="true"
+            android:allowEmbedded="true"
+            android:theme="@style/Theme.Aird"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize" />
+
         <service
             android:name=".AirdConnectionService"
             android:foregroundServiceType="remoteMessaging|microphone|camera|phoneCall"

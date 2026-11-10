@@ -161,6 +161,7 @@ object AirdHttp {
         context: Context,
         path: String,
         dest: File,
+        jarOnly: Boolean = false,
         onProgress: (bytes: Long, total: Long) -> Unit = { _, _ -> },
     ): String = withContext(Dispatchers.IO) {
         CookieManager.getInstance().flush()
@@ -171,7 +172,7 @@ object AirdHttp {
             .header("Accept", "*/*")
             .header("Cache-Control", "no-cache")
             .header("Origin", ServerStore.get(context))
-        attachWebViewCookies(builder, context, url)
+        if (!jarOnly) attachWebViewCookies(builder, context, url)
         try {
             client.newCall(builder.build()).execute().use { response ->
                 if (!response.isSuccessful) error("Could not open the file (${response.code})")

@@ -48,8 +48,12 @@ object ChatDownloads {
     }
 }
 
-/** Chat file API path; share links are for browser open only. */
-fun ChatAttachment.downloadPath(): String = url
+/** Original file. `dl=1` asks the server for the file rather than a preview. */
+fun ChatAttachment.downloadPath(): String {
+    val raw = url.trim()
+    if (raw.isBlank() || raw.contains("dl=1")) return raw
+    return raw + if (raw.contains("?")) "&dl=1" else "?dl=1"
+}
 
 fun openHttpUrl(context: Context, raw: String) {
     val trimmed = raw.trim().trimEnd('.', ',', ';', ')')
@@ -83,12 +87,7 @@ private suspend fun singleFlight(key: String, block: suspend () -> File?): File?
 }
 
 suspend fun downloadChatAttachment(context: Context, messageId: String, attachment: ChatAttachment): Boolean =
-    withContext(Dispatchers.IO) {
-        val file = ensureAppFile(context, messageId, attachment) ?: return@withContext false
-        if (!file.exists() || file.length() == 0L) return@withContext false
-        toast(context, "Saved in app")
-        true
-    }
+    saveChatAttachmentToDevice(context, messageId, attachment)
 
 suspend fun saveChatAttachmentToDevice(context: Context, messageId: String, attachment: ChatAttachment): Boolean =
     withContext(Dispatchers.IO) {
@@ -264,11 +263,12 @@ private suspend fun ensureAppFile(context: Context, messageId: String, attachmen
         val part = File(dest.parentFile, "${dest.name}.part")
         try {
             part.delete()
-            AirdHttp.saveTo(app, path, part) { bytes, total ->
+            AirdHttp.saveTo(app, path, part, jarOnly = true) { bytes, total ->
                 ChatDownloads.publish(key, bytes, total)
             }
             if (looksLikeErrorBody(part)) {
                 part.delete()
+                if (copyCachedImage(app, attachment.url, dest)) return@singleFlight dest
                 toast(app, "File is not available on server")
                 return@singleFlight null
             }
@@ -290,6 +290,7 @@ private suspend fun ensureAppFile(context: Context, messageId: String, attachmen
         } catch (e: Exception) {
             part.delete()
             if (dest.exists() && dest.length() == 0L) dest.delete()
+            if (copyCachedImage(app, attachment.url, dest)) return@singleFlight dest
             e.printStackTrace()
             toast(app, "Download failed: ${e.localizedMessage}")
             null
@@ -297,6 +298,28 @@ private suspend fun ensureAppFile(context: Context, messageId: String, attachmen
             ChatDownloads.clear(key)
         }
     }
+}
+
+private fun copyCachedImage(context: Context, displayUrl: String, dest: File): Boolean {
+    if (displayUrl.isBlank()) return false
+    val absolute = AirdHttp.absolute(context, displayUrl)
+    val snapshot = chatImageLoader(context).diskCache?.openSnapshot(absolute) ?: return false
+    try {
+        snapshot.use { snap ->
+            val source = snap.data.toFile()
+            if (!source.isFile || source.length() == 0L) return false
+            if (dest.exists()) dest.delete()
+            source.copyTo(dest, overwrite = true)
+        }
+    } catch (_: Exception) {
+        dest.delete()
+        return false
+    }
+    if (!dest.isFile || dest.length() == 0L || looksLikeErrorBody(dest)) {
+        dest.delete()
+        return false
+    }
+    return true
 }
 
 private fun appChatFile(context: Context, messageId: String, index: Int, name: String): File {

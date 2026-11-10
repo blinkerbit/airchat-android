@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.view.inputmethod.EditorInfo
+import android.graphics.Rect
 import android.widget.EditText
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,6 +20,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -370,6 +372,17 @@ fun Composer(
     val keyboardController = LocalSoftwareKeyboardController.current
     val panelState = rememberUpdatedState(panel)
     val panelSink = rememberUpdatedState(onPanel)
+    val keyboardShow = rememberUpdatedState(keyboardController)
+    val handingOff = remember { mutableStateOf(false) }
+    val fieldSlot = remember { FieldSlot() }
+    fun openChrome(name: String) {
+        val field = fieldSlot.field
+        handingOff.value = field?.hasFocus() == true
+        field?.clearFocus()
+        if (field?.hasFocus() != true) handingOff.value = false
+        keyboardController?.hide()
+        onPanel(name)
+    }
 
     BackHandler(enabled = panel == "emoji" || panel == "plus") {
         onPanel("")
@@ -476,7 +489,16 @@ fun Composer(
 
         val refs by CollabRepository.refs.collectAsState()
         val shelfFor by CollabRepository.shelfFor.collectAsState()
-        if (shelfFor == activeId && refs.isNotEmpty()) CollabShelf(refs)
+        val openShelf = refs.filter {
+            (it.kind == "list" || it.kind == "poll") && it.active && shelfFor == ChatRepository.activeId.value
+        }
+        AnimatedVisibility(
+            visible = openShelf.isNotEmpty(),
+            enter = if (reduced) fadeIn(tween(80)) else fadeIn(tween(180)) + expandVertically(tween(200)),
+            exit = if (reduced) fadeOut(tween(80)) else fadeOut(tween(140)) + shrinkVertically(tween(180)),
+        ) {
+            CollabShelf(openShelf)
+        }
 
         val canSend = draft.isNotBlank() && !uploading
         val voiceMode = when {
@@ -563,13 +585,7 @@ fun Composer(
         ) {
             IconButton(
                 onClick = {
-                    if (panel == "plus") {
-                        onPanel("")
-                        keyboardController?.show()
-                    } else {
-                        keyboardController?.hide()
-                        onPanel("plus")
-                    }
+                    if (panel == "plus") onPanel("") else openChrome("plus")
                 },
                 modifier = Modifier.size(40.dp)
             ) {
@@ -582,10 +598,10 @@ fun Composer(
                 onClick = {
                     if (panel == "emoji") {
                         onPanel("")
+                        fieldSlot.field?.requestFocus()
                         keyboardController?.show()
                     } else {
-                        keyboardController?.hide()
-                        onPanel("emoji")
+                        openChrome("emoji")
                     }
                 },
                 modifier = Modifier.size(40.dp)
@@ -599,6 +615,7 @@ fun Composer(
                 modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
                 factory = { ctx ->
                     ComposerField(ctx).apply {
+                        fieldSlot.field = this
                         background = null
                         hint = "Message"
                         textSize = 16f
@@ -616,12 +633,17 @@ fun Composer(
                             }
                         }
                         setOnClickListener {
-                            if (panelState.value == "emoji") {
+                            if (panelState.value == "emoji" || panelState.value == "plus") {
                                 panelSink.value("")
+                                keyboardShow.value?.show()
                             }
                         }
                         setOnFocusChangeListener { _, hasFocus ->
-                            if (hasFocus && panelState.value == "emoji") {
+                            if (handingOff.value) {
+                                handingOff.value = false
+                                return@setOnFocusChangeListener
+                            }
+                            if (hasFocus && (panelState.value == "emoji" || panelState.value == "plus")) {
                                 panelSink.value("")
                             }
                         }
@@ -713,10 +735,13 @@ fun Composer(
             val chosen = if (keyboardPx > 0) keyboardPx else fallback
             chosen.coerceIn(280.dp.roundToPx(), 400.dp.roundToPx()).toDp()
         }
+        val chromeEnter = if (reduced) EnterTransition.None else expandVertically(tween(160, easing = FastOutSlowInEasing)) + fadeIn(tween(140))
+        val chromeExit = if (reduced) ExitTransition.None else shrinkVertically(tween(160, easing = FastOutSlowInEasing)) + fadeOut(tween(120))
+        Column(Modifier.fillMaxWidth()) {
         AnimatedVisibility(
             visible = panel == "plus" && voiceMode == 0,
-            enter = if (reduced) EnterTransition.None else expandVertically(tween(220)) + fadeIn(tween(200)),
-            exit = if (reduced) ExitTransition.None else shrinkVertically(tween(200)) + fadeOut(tween(180)),
+            enter = chromeEnter,
+            exit = chromeExit,
         ) {
             PlusPanel(
                 onClose = { onPanel("") },
@@ -734,9 +759,9 @@ fun Composer(
             )
         }
         AnimatedVisibility(
-            visible = panel == "emoji" && voiceMode == 0,
-            enter = if (reduced) EnterTransition.None else expandVertically(tween(220)) + fadeIn(tween(200)),
-            exit = if (reduced) ExitTransition.None else shrinkVertically(tween(200)) + fadeOut(tween(180)),
+            visible = panel == "emoji" && voiceMode == 0 && imePx == 0,
+            enter = chromeEnter,
+            exit = chromeExit,
         ) {
             EmojiPanel(
                 modifier = Modifier.fillMaxWidth().height(emojiHeight),
@@ -753,7 +778,12 @@ fun Composer(
                 },
             )
         }
+        }
     }
+}
+
+private class FieldSlot {
+    var field: ComposerField? = null
 }
 
 private class ComposerField(context: Context) : EditText(context) {
@@ -763,6 +793,10 @@ private class ComposerField(context: Context) : EditText(context) {
         super.onSelectionChanged(selStart, selEnd)
         if (selStart >= 0) onCursor?.invoke(selStart)
     }
+
+    override fun bringPointIntoView(offset: Int): Boolean = true
+
+    override fun requestRectangleOnScreen(rectangle: Rect?, immediate: Boolean): Boolean = true
 }
 
 private fun mentionAtCursor(text: String, cursor: Int): Pair<Int, String>? {
