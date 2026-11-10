@@ -10,6 +10,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
         when (intent.action) {
             ACTION_ACCEPT -> {
                 CallController.restoreIncoming(
+                    context,
                     intent.getStringExtra(KEY_CONVERSATION).orEmpty(),
                     intent.getStringExtra(KEY_CALL).orEmpty(),
                     intent.getStringExtra(KEY_MODE).orEmpty(),
@@ -28,6 +29,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
             }
             ACTION_DECLINE -> {
                 CallController.restoreIncoming(
+                    context,
                     intent.getStringExtra(KEY_CONVERSATION).orEmpty(),
                     intent.getStringExtra(KEY_CALL).orEmpty(),
                     intent.getStringExtra(KEY_MODE).orEmpty(),

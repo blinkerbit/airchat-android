@@ -329,6 +329,7 @@ class MainActivity : ComponentActivity() {
             "open_lists" -> openLists.value = true
             "accept_call" -> {
                 CallController.restoreIncoming(
+                    this,
                     intent.getStringExtra("conversation_id").orEmpty(),
                     intent.getStringExtra("call_id").orEmpty(),
                     intent.getStringExtra("call_mode").orEmpty(),
@@ -346,7 +347,7 @@ class MainActivity : ComponentActivity() {
                 val callId = intent.getStringExtra("call_id").orEmpty()
                 val mode = intent.getStringExtra("call_mode").orEmpty()
                 val from = intent.getStringExtra("call_from").orEmpty()
-                CallController.restoreIncoming(conversationId, callId, mode, from)
+                CallController.restoreIncoming(this, conversationId, callId, mode, from)
                 AirdConnectionService.showRinging(
                     this,
                     conversationId = conversationId,

@@ -10,6 +10,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -66,7 +68,7 @@ class AirdConnectionService : Service() {
                 val peer = intent.getStringExtra(EXTRA_PEER).orEmpty()
                 val mode = intent.getStringExtra(EXTRA_MODE_KIND).orEmpty().ifEmpty { "audio" }
                 if (conv.isNotEmpty()) {
-                    CallController.restoreIncoming(conv, callId, mode, peer)
+                    CallController.restoreIncoming(this, conv, callId, mode, peer)
                 }
                 presentIncoming(intent.getBooleanExtra(EXTRA_ALERT, true))
             }
@@ -177,10 +179,15 @@ class AirdConnectionService : Service() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setAllowBubbles(true)
             },
         )
+        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        val callAudioAttr = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
         manager.createNotificationChannel(
             NotificationChannel(CALL_CHANNEL_ID, "Incoming Calls", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Incoming voice and video calls"
-                setSound(null, null)
+                setSound(ringtoneUri, callAudioAttr)
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 400, 200, 400)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
@@ -399,7 +406,7 @@ class AirdConnectionService : Service() {
         ) {
             onMain {
                 if (conversationId.isNotEmpty()) {
-                    CallController.restoreIncoming(conversationId, callId, mode, peer)
+                    CallController.restoreIncoming(context, conversationId, callId, mode, peer)
                 }
                 val service = instance
                 if (service != null) {

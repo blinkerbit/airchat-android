@@ -300,10 +300,13 @@ object CallController {
         }
     }
 
-    fun restoreIncoming(conversationId: String, callId: String, mode: String, from: String) {
+    fun restoreIncoming(context: Context, conversationId: String, callId: String, mode: String, from: String) {
         if (conversationId.isEmpty()) return
         val current = _snapshot.value
-        if (current.phase == CallPhase.Incoming && current.conversationId == conversationId) return
+        if (current.phase == CallPhase.Incoming && current.conversationId == conversationId) {
+            ring(context)
+            return
+        }
         if (current.phase != CallPhase.Idle) return
         _snapshot.value = CallSnapshot(
             phase = CallPhase.Incoming,
@@ -313,6 +316,7 @@ object CallController {
             mode = if (mode == "video") "video" else "audio",
             status = if (mode == "video") "Incoming video call" else "Incoming voice call",
         )
+        ring(context)
     }
 
     /** After the socket comes back: ring if the call is still live, else show a missed notice. */
