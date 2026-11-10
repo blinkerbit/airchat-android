@@ -11,6 +11,8 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -22,16 +24,24 @@ import com.aird.session.AirdHttp
 import com.aird.session.AirdSocket
 import com.aird.session.Session
 import io.livekit.android.LiveKit
+import io.livekit.android.RoomOptions
 import io.livekit.android.events.DisconnectReason
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
 import android.telecom.DisconnectCause
+import io.livekit.android.room.participant.BackupVideoCodec
+import io.livekit.android.room.participant.VideoTrackPublishDefaults
 import io.livekit.android.room.participant.VideoTrackPublishOptions
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.LocalVideoTrackOptions
 import io.livekit.android.room.track.Track
+import io.livekit.android.room.track.VideoCaptureParameter
+import io.livekit.android.room.track.VideoCodec
+import io.livekit.android.room.track.VideoEncoding
 import io.livekit.android.room.track.VideoTrack
+import livekit.org.webrtc.RtpParameters
 import io.livekit.android.util.flow
 import livekit.org.webrtc.Camera2Enumerator
 import kotlinx.coroutines.CoroutineScope
@@ -762,6 +772,46 @@ object CallController {
         _snapshot.value = _snapshot.value.copy(minimized = false)
     }
 
+    /** Cellular and other metered links. Wi-Fi and ethernet stay on the sharper HD profile. */
+    private fun meteredNetwork(context: Context): Boolean {
+        val manager = context.getSystemService(ConnectivityManager::class.java) ?: return false
+        val caps = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        ) {
+            return false
+        }
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return true
+        return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }
+
+    /**
+     * One hardware H.264 stream. Simulcast VP8 was uploading several layers at once and
+     * the default encoder kept 30 fps by shrinking the picture, which is why the same
+     * link looked soft next to a single-stream call.
+     */
+    private fun callRoomOptions(context: Context): RoomOptions {
+        val metered = meteredNetwork(context)
+        val capture = if (metered) VideoCaptureParameter(960, 540, 15) else VideoCaptureParameter(1280, 720, 24)
+        val encoding = if (metered) VideoEncoding(900_000, 15) else VideoEncoding(2_000_000, 24)
+        return RoomOptions(
+            adaptiveStream = false,
+            dynacast = true,
+            videoTrackCaptureDefaults = LocalVideoTrackOptions(captureParams = capture),
+            videoTrackPublishDefaults = VideoTrackPublishDefaults(
+                videoEncoding = encoding,
+                simulcast = false,
+                videoCodec = VideoCodec.H264.codecName,
+                backupCodec = BackupVideoCodec(
+                    codec = VideoCodec.VP8.codecName,
+                    encoding = encoding,
+                    simulcast = false,
+                ),
+                degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION,
+            ),
+        )
+    }
+
     private suspend fun connect(context: Context, url: String, token: String, video: Boolean, camera: Boolean = video) {
         if (url.isEmpty() || token.isEmpty()) {
             finish(context, "Call is not configured", signal = false, shade = null)
@@ -774,7 +824,7 @@ object CallController {
         val gen = generation
         val audio = context.getSystemService(AudioManager::class.java)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        val next = LiveKit.create(context.applicationContext)
+        val next = LiveKit.create(context.applicationContext, callRoomOptions(context))
         CallDevices.prepareRouter(next, speakerDefault = video)
         room = next
         CallDevices.onRouteChanged = { choice -> showRoute(context, choice) }

@@ -160,45 +160,7 @@ class AirdConnectionService : Service() {
     }
 
     private fun createChannels() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = getSystemService(NotificationManager::class.java)
-        // Clean up legacy channels if present
-        try {
-            manager.deleteNotificationChannel("aird_chat_messages")
-            manager.deleteNotificationChannel("aird_chat_messages_v2")
-            manager.deleteNotificationChannel("aird_chat_calls")
-            manager.deleteNotificationChannel("aird_chat_calls_v2")
-        } catch (_: Exception) {}
-
-        manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Chat Messages", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Chat message alerts"
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 250, 250, 250)
-                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setAllowBubbles(true)
-            },
-        )
-        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-        val callAudioAttr = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .build()
-        manager.createNotificationChannel(
-            NotificationChannel(CALL_CHANNEL_ID, "Incoming Calls", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Incoming voice and video calls"
-                setSound(ringtoneUri, callAudioAttr)
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 400, 200, 400)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            },
-        )
-        manager.createNotificationChannel(
-            NotificationChannel(SERVICE_CHANNEL_ID, "Aird Chat Connection", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Keeps chat and call connection active"
-                setSound(null, null)
-            },
-        )
+        ensureChannels(this)
     }
 
     private fun openCall(): PendingIntent = activityPending(
@@ -392,7 +354,51 @@ class AirdConnectionService : Service() {
             context.stopService(Intent(context, AirdConnectionService::class.java))
         }
 
+        fun ensureChannels(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val manager = context.applicationContext.getSystemService(NotificationManager::class.java) ?: return
+
+            if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(CHANNEL_ID, "Chat Messages", NotificationManager.IMPORTANCE_HIGH).apply {
+                        description = "Chat message alerts"
+                        enableVibration(true)
+                        vibrationPattern = longArrayOf(0, 250, 250, 250)
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setAllowBubbles(true)
+                    },
+                )
+            }
+
+            if (manager.getNotificationChannel(CALL_CHANNEL_ID) == null) {
+                val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                val callAudioAttr = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                manager.createNotificationChannel(
+                    NotificationChannel(CALL_CHANNEL_ID, "Incoming Calls", NotificationManager.IMPORTANCE_HIGH).apply {
+                        description = "Incoming voice and video calls"
+                        setSound(ringtoneUri, callAudioAttr)
+                        enableVibration(true)
+                        vibrationPattern = longArrayOf(0, 400, 200, 400)
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    },
+                )
+            }
+
+            if (manager.getNotificationChannel(SERVICE_CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(SERVICE_CHANNEL_ID, "Aird Chat Connection", NotificationManager.IMPORTANCE_LOW).apply {
+                        description = "Keeps chat and call connection active"
+                        setSound(null, null)
+                    },
+                )
+            }
+        }
+
         fun start(context: Context) {
+            ensureChannels(context)
             launch(context, null)
         }
 
