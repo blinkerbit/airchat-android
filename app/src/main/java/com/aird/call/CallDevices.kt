@@ -272,32 +272,31 @@ object CallDevices {
         appRef = context.applicationContext
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         listen(audio)
+        ensureVoiceVolume(audio)
+
+        val kind = kindOfId(choice.id)
+        val isSpeaker = (kind == "speaker")
+
+        @Suppress("DEPRECATION")
+        audio.isSpeakerphoneOn = isSpeaker
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (syncSwitch) alignSwitch(roomRef, choice)
             val target = resolve(audio, choice)
             if (target != null) {
-                val ok = try {
+                try {
                     audio.setCommunicationDevice(target)
                 } catch (_: Exception) {
-                    false
-                }
-                val now = audio.communicationDevice
-                if (!ok || now?.type != target.type) {
-                    if (kindOfId(choice.id) == "speaker" || kindOfId(choice.id) == "earpiece") {
-                        @Suppress("DEPRECATION")
-                        audio.isSpeakerphoneOn = kindOfId(choice.id) == "speaker"
-                        try {
-                            audio.setCommunicationDevice(target)
-                        } catch (_: Exception) {
-                        }
-                    }
                 }
                 followInput(audio, roomRef, target)
+            } else {
+                try {
+                    audio.clearCommunicationDevice()
+                } catch (_: Exception) {
+                }
             }
+            @Suppress("DEPRECATION")
+            audio.isSpeakerphoneOn = isSpeaker
             appliedId = choice.id
-            if (session && audio.communicationDevice?.let { kindOf(it.type) } != kindOfId(choice.id)) {
-                scheduleRepair()
-            }
         } else {
             applyLegacy(audio, roomRef, choice)
             appliedId = choice.id
@@ -383,12 +382,14 @@ object CallDevices {
     }
 
     private fun ensureVoiceVolume(audio: AudioManager) {
-        if (raisedVolume) return
         try {
-            val max = audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-            val now = audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
-            if (max > 0 && now * 10 < max * 8) {
-                audio.setStreamVolume(AudioManager.STREAM_VOICE_CALL, (max * 9) / 10, 0)
+            val maxVoice = audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            if (maxVoice > 0) {
+                audio.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoice, 0)
+            }
+            val maxMusic = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (maxMusic > 0) {
+                audio.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
             }
         } catch (_: Exception) {
         }
