@@ -180,9 +180,29 @@ object CallDevices {
         return if (name.isNotEmpty() && !name.contains("bluetooth", true)) "Bluetooth ($name)" else "Bluetooth"
     }
 
+    fun maximizeCallVolume(context: Context) {
+        val audio = context.getSystemService(AudioManager::class.java) ?: return
+        try {
+            val maxVoice = audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            if (maxVoice > 0) audio.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoice, 0)
+            val maxMusic = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (maxMusic > 0) audio.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
+        } catch (_: Exception) {
+        }
+    }
+
     private fun holdRoute(audio: AudioManager, room: Room?, choice: DeviceChoice) {
         val route = routeOf(choice)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
+
+        try {
+            val maxVoice = audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            if (maxVoice > 0) audio.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoice, 0)
+            val maxMusic = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (maxMusic > 0) audio.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
+        } catch (_: Exception) {
+        }
+
         preferSwitch(room, route, choice)
         selectSwitchByLabel(room, switchLabel(choice))
         @Suppress("DEPRECATION")
@@ -192,10 +212,8 @@ object CallDevices {
             @Suppress("DEPRECATION")
             audio.isBluetoothScoOn = false
         }
-        // S26 and other Samsung phones report success from setCommunicationDevice and
-        // then keep the previous speaker. The speakerphone flag has to be set as well.
         @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = route == Route.Speaker
+        audio.isSpeakerphoneOn = (route == Route.Speaker)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val listed = audio.availableCommunicationDevices
             val exactId = choice.id.substringAfter("comm:", "").toIntOrNull()
@@ -213,7 +231,7 @@ object CallDevices {
             audio.isBluetoothScoOn = true
         }
         @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = route == Route.Speaker
+        audio.isSpeakerphoneOn = (route == Route.Speaker)
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         selectSwitchByLabel(room, switchLabel(choice))
     }

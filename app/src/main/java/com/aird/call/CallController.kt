@@ -530,7 +530,8 @@ object CallController {
     }
 
     fun toggleSpeaker(context: Context) {
-        val next = if (_snapshot.value.output == "speaker") "earpiece" else "speaker"
+        val currentIsSpeaker = _snapshot.value.speaker || _snapshot.value.output == "speaker"
+        val next = if (currentIsSpeaker) "earpiece" else "speaker"
         val choice = CallDevices.audioOutputs(context, room).firstOrNull { CallDevices.outputKey(it) == next }
             ?: DeviceChoice(next, next.replaceFirstChar { it.uppercase() })
         chooseOutput(context, choice)
