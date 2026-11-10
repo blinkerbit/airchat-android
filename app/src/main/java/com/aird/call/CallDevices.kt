@@ -277,6 +277,8 @@ object CallDevices {
         val kind = kindOfId(choice.id)
         val isSpeaker = (kind == "speaker")
 
+        AirdTelecom.setSpeaker(isSpeaker)
+
         @Suppress("DEPRECATION")
         audio.isSpeakerphoneOn = isSpeaker
 

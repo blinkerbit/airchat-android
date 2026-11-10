@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.telecom.CallAudioState
 import android.telecom.Connection
 import android.telecom.ConnectionRequest
 import android.telecom.ConnectionService
@@ -162,6 +163,13 @@ object AirdTelecom {
         onMain { connection?.setActive() }
     }
 
+    fun setSpeaker(speakerOn: Boolean) {
+        onMain {
+            val route = if (speakerOn) CallAudioState.ROUTE_SPEAKER else CallAudioState.ROUTE_EARPIECE
+            connection?.setAudioRoute(route)
+        }
+    }
+
     fun drop(call: Connection) {
         if (connection === call) connection = null
     }
@@ -209,6 +217,13 @@ private class AirdCallConnection(
         setCallerDisplayName(label ?: target.schemeSpecificPart ?: "Aird", TelecomManager.PRESENTATION_ALLOWED)
         val video = request?.extras?.getBoolean(AirdTelecom.EXTRA_VIDEO) == true
         if (video) videoState = VideoProfile.STATE_BIDIRECTIONAL
+    }
+
+    override fun onCallAudioStateChanged(state: CallAudioState?) {
+        super.onCallAudioStateChanged(state)
+        if (state == null) return
+        val isSpeaker = state.route == CallAudioState.ROUTE_SPEAKER
+        CallController.onTelecomAudioRouteChanged(app, isSpeaker)
     }
 
     fun release(cause: Int) {

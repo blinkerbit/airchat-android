@@ -535,7 +535,7 @@ object CallController {
 
     fun toggleSpeaker(context: Context) {
         val outputs = CallDevices.audioOutputs(context, room)
-        val onSpeaker = _snapshot.value.output == "speaker"
+        val onSpeaker = _snapshot.value.speaker || _snapshot.value.output == "speaker"
         val next = if (onSpeaker) {
             outputs.firstOrNull { CallDevices.outputKey(it) == "earpiece" }
                 ?: outputs.firstOrNull { CallDevices.outputKey(it) == "headset" }
@@ -543,6 +543,16 @@ object CallController {
             outputs.firstOrNull { CallDevices.outputKey(it) == "speaker" }
         } ?: return
         chooseOutput(context, next)
+    }
+
+    fun onTelecomAudioRouteChanged(context: Context, isSpeaker: Boolean) {
+        val currentIsSpeaker = _snapshot.value.speaker || _snapshot.value.output == "speaker"
+        if (currentIsSpeaker != isSpeaker) {
+            val targetKey = if (isSpeaker) "speaker" else "earpiece"
+            val choice = CallDevices.audioOutputs(context, room).firstOrNull { CallDevices.outputKey(it) == targetKey }
+                ?: DeviceChoice(targetKey, targetKey.replaceFirstChar { it.uppercase() })
+            chooseOutput(context, choice)
+        }
     }
 
     private fun showRoute(context: Context, choice: DeviceChoice) {
