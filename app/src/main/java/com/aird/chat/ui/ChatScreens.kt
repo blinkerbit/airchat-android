@@ -1012,16 +1012,22 @@ private fun ConversationList(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    if (conversation.request == "incoming") {
+                                    val requestLabel = when (conversation.request) {
+                                        "incoming" -> "Request"
+                                        "outgoing" -> "Pending"
+                                        else -> ""
+                                    }
+                                    if (requestLabel.isNotEmpty()) {
+                                        val incoming = conversation.request == "incoming"
                                         Text(
-                                            "Request",
+                                            requestLabel,
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onPrimary,
+                                            color = if (incoming) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer,
                                             modifier = Modifier
                                                 .padding(end = 6.dp)
                                                 .clip(RoundedCornerShape(6.dp))
-                                                .background(MaterialTheme.colorScheme.primary)
+                                                .background(if (incoming) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
                                                 .padding(horizontal = 6.dp, vertical = 1.dp),
                                         )
                                     }

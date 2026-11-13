@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import com.aird.AppForeground
+import com.aird.ChatBubbleActivity
 import com.aird.chat.model.ChatAttachment
 import com.aird.chat.model.ChatMessage
 import com.aird.chat.model.ChatPin
@@ -173,7 +174,8 @@ object ChatRepository {
         if (AppForeground.resumed()) return
         val known = ChatNotifier.hasLedger(context)
         items.forEach { conv ->
-            if (conv.unread <= 0 || conv.muted || conv.request.isNotEmpty()) return@forEach
+            val invite = conv.request == "incoming"
+            if (conv.muted || (!invite && (conv.unread <= 0 || conv.request.isNotEmpty()))) return@forEach
             val seen = ChatNotifier.seen(context, conv.id)
             if (seen == null && !known) return@forEach
             if (seen == conv.updatedAt) return@forEach
@@ -182,7 +184,7 @@ object ChatRepository {
                 conv.id,
                 conv.name(),
                 conv.peer.ifEmpty { conv.name() },
-                conv.preview.ifBlank { "New message" },
+                if (invite) "Wants to chat" else conv.preview.ifBlank { "New message" },
                 messageId = conv.updatedAt.ifEmpty { conv.id },
                 group = conv.kind == "group",
             )
@@ -361,7 +363,7 @@ object ChatRepository {
         val previous = _activeId.value
         if (previous == conversationId && _messages.value.isNotEmpty()) {
             touchConversation(context, conversationId, unread = 0)
-            ChatNotifier.cancel(context, conversationId)
+            if (context !is ChatBubbleActivity) ChatNotifier.cancel(context, conversationId)
             refreshOpen(context, conversationId, mark = true)
             return
         }
@@ -387,7 +389,7 @@ object ChatRepository {
         }
         _activeId.value = conversationId
         touchConversation(context, conversationId, unread = 0)
-        ChatNotifier.cancel(context, conversationId)
+        if (context !is ChatBubbleActivity) ChatNotifier.cancel(context, conversationId)
         refreshOpen(context, conversationId, mark = true)
     }
 
@@ -1661,6 +1663,29 @@ object ChatRepository {
                     scope.launch { open(context, convId) }
                 }
             }
+            "chat_request" -> {
+                val convId = data.optString("conversation_id")
+                scope.launch {
+                    refresh(context, quiet = true)
+                    if (convId.isEmpty()) return@launch
+                    val conv = _conversations.value.firstOrNull { it.id == convId }
+                    val looking = convId == _activeId.value
+                    if (looking) {
+                        if (conv == null) close()
+                        else if (conv.request.isEmpty()) open(context, convId)
+                    } else if (conv?.request == "incoming" && !conv.muted) {
+                        val who = data.optString("from").ifBlank { conv.peer.ifEmpty { conv.name() } }
+                        ChatNotifier.show(
+                            context,
+                            convId,
+                            conv.name(),
+                            who,
+                            data.optString("preview").ifBlank { "Wants to chat" },
+                            group = conv.kind == "group",
+                        )
+                    }
+                }
+            }
             "error" -> _error.value = data.optString("message")
         }
     }
@@ -2090,14 +2115,21 @@ object ChatRepository {
 
     private suspend fun toConversation(context: Context, item: JSONObject): Conversation {
         val id = item.optString("id")
-        var preview = plain(item.optString("last_preview"))
-        val decrypted = lastE2ePreview(context, id, item)
-        if (decrypted != null) {
-            preview = decrypted
-        } else if (preview.equals("Encrypted message", true)) {
-            val lastType = item.optString("last_type")
-            if (lastType.isNotEmpty() && lastType != "text") {
-                preview = "Shared a file"
+        val request = item.optString("request")
+        var preview = when (request) {
+            "incoming" -> "Chat request"
+            "outgoing" -> "Waiting for acceptance"
+            else -> plain(item.optString("last_preview"))
+        }
+        if (request.isEmpty()) {
+            val decrypted = lastE2ePreview(context, id, item)
+            if (decrypted != null) {
+                preview = decrypted
+            } else if (preview.equals("Encrypted message", true)) {
+                val lastType = item.optString("last_type")
+                if (lastType.isNotEmpty() && lastType != "text") {
+                    preview = "Shared a file"
+                }
             }
         }
         val members = buildList {
@@ -2120,7 +2152,7 @@ object ChatRepository {
             muted = item.optBoolean("muted"),
             members = members,
             online = item.optBoolean("online"),
-            request = item.optString("request"),
+            request = request,
         )
     }
 

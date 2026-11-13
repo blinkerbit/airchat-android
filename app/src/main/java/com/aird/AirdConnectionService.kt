@@ -33,6 +33,7 @@ class AirdConnectionService : Service() {
         AppForeground.install()
         createChannels()
         startAs(listening(), remoteOnly = true)
+        if (CallController.snapshot.value.phase == CallPhase.Idle) presentIdle()
         if (!hooked) {
             hooked = true
             val app = applicationContext
@@ -53,6 +54,10 @@ class AirdConnectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.getStringExtra(EXTRA_MODE)) {
             "video", "audio" -> {
+                if (CallController.snapshot.value.phase == CallPhase.Idle) {
+                    presentIdle()
+                    return START_STICKY
+                }
                 val video = intent.getStringExtra(EXTRA_MODE) == "video"
                 val camera = intent.getBooleanExtra(EXTRA_CAMERA, video)
                 val peer = intent.getStringExtra(EXTRA_PEER).orEmpty().ifEmpty { "Aird Chat" }
@@ -72,8 +77,8 @@ class AirdConnectionService : Service() {
                 }
                 presentIncoming(intent.getBooleanExtra(EXTRA_ALERT, true))
             }
-            "joining" -> presentJoining()
-            "idle" -> tryStart(listening(), remoteOnly = true)
+            "joining" -> if (CallController.snapshot.value.phase == CallPhase.Idle) presentIdle() else presentJoining()
+            "idle" -> presentIdle()
         }
         return START_STICKY
     }
@@ -203,6 +208,22 @@ class AirdConnectionService : Service() {
 
     private fun refreshIdleNotification() {
         if (CallController.snapshot.value.phase != CallPhase.Idle) return
+        presentIdle()
+    }
+
+    /** Drop the call-style lock-screen notification, including its running timer. */
+    private fun presentIdle() {
+        val manager = getSystemService(NotificationManager::class.java)
+        try {
+            manager.cancel(INCOMING_FALLBACK_ID)
+        } catch (_: RuntimeException) {
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } catch (_: RuntimeException) {
+            }
+        }
         tryStart(listening(), remoteOnly = true)
     }
 
@@ -219,6 +240,9 @@ class AirdConnectionService : Service() {
             .setContentIntent(openApp())
             .setOngoing(true)
             .setSilent(true)
+            .setShowWhen(false)
+            .setUsesChronometer(false)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
@@ -444,7 +468,10 @@ class AirdConnectionService : Service() {
         }
 
         fun showInCall(context: Context, peer: String, video: Boolean, camera: Boolean = video) {
-            launch(context, if (video) "video" else "audio", peer, camera)
+            onMain {
+                if (CallController.snapshot.value.phase == CallPhase.Idle) return@onMain
+                launch(context, if (video) "video" else "audio", peer, camera)
+            }
         }
 
         fun showIdle(context: Context) {

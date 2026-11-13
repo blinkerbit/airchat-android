@@ -321,7 +321,7 @@ object ChatNotifier {
             app,
             ("bubble:$conversationId").hashCode(),
             bubbleOpen,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            PendingIntent.FLAG_UPDATE_CURRENT or mutableFlag(),
         )
         val reply = RemoteInput.Builder(NotificationReplyReceiver.KEY_TEXT_REPLY)
             .setLabel("Reply")
@@ -371,7 +371,15 @@ object ChatNotifier {
             .addAction(android.R.drawable.ic_menu_view, "Mark read", readPending)
             .addPerson(conversation)
         publishShortcut(app, conversationId, label, icon, open, bubblePending, builder, expand)
-        app.getSystemService(NotificationManager::class.java).notify(conversationId.hashCode(), builder.build())
+        val manager = app.getSystemService(NotificationManager::class.java)
+        val id = conversationId.hashCode()
+        try {
+            manager.notify(id, builder.build())
+        } catch (err: RuntimeException) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) throw err
+            builder.setBubbleMetadata(null)
+            manager.notify(id, builder.build())
+        }
     }
 
     private fun mediaUri(context: Context, note: Note): Uri? {

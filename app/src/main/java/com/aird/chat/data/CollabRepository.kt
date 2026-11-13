@@ -193,6 +193,8 @@ object CollabRepository {
                     active = item.flag("active") ?: true,
                     organizer = item.optString("organizer"),
                     tags = collabTags(item.optJSONArray("tags")),
+                    search = jsonArray(item.optJSONArray("notes")).joinToString(" ") { it.optString("title") } +
+                        " " + jsonArray(item.optJSONArray("preview")).joinToString(" ") { it.optString("title") },
                 )
             },
             groups = jsonArray(body.optJSONArray("groups")).mapNotNull { item ->
@@ -402,14 +404,23 @@ object CollabRepository {
         labels: List<String> = emptyList(),
         notes: String = "",
         dueAt: String = "",
+        kind: String = "check",
     ) {
         val clean = text.trim()
         if (clean.isEmpty()) throw CollabException("Add an item.")
+        val rowKind = when (kind) {
+            "bullet" -> "bullet"
+            "paragraph", "note", "text" -> "paragraph"
+            else -> "checkbox"
+        }
         val body = JSONObject()
-            .put("text", clean.take(300))
+            .put("kind", rowKind)
+            .put("type", rowKind)
+            .put("text", clean.take(8000))
+            .put("content", clean.take(8000))
             .put("notes", notes.trim().take(4000))
             .put("labels", JSONArray(labels.map { it.trim() }.filter { it.isNotEmpty() }.take(8)))
-        if (dueAt.isNotBlank()) {
+        if (dueAt.isNotBlank() && rowKind == "checkbox") {
             body.put("due_at", dueAt)
             body.put("remind_at", dueAt)
         }
@@ -424,16 +435,33 @@ object CollabRepository {
         labels: List<String>,
         notes: String = item.notes,
         dueAt: String = item.dueAt,
+        kind: String = item.kind,
     ) {
         val clean = text.trim()
         if (clean.isEmpty()) throw CollabException("Add an item.")
+        val rowKind = when (kind) {
+            "bullet" -> "bullet"
+            "paragraph", "note", "text" -> "paragraph"
+            else -> "checkbox"
+        }
         val body = JSONObject()
-            .put("text", clean.take(300))
+            .put("kind", rowKind)
+            .put("type", rowKind)
+            .put("text", clean.take(8000))
+            .put("content", clean.take(8000))
             .put("notes", notes.trim().take(4000))
             .put("due_at", dueAt)
             .put("remind_at", dueAt)
             .put("labels", JSONArray(labels.map { it.trim() }.filter { it.isNotEmpty() }.take(8)))
         act(list) { sendDetail(context, "PATCH", "/api/lists/${list.id}/items/${item.id}", body, ::parseList) }
+    }
+
+    suspend fun syncList(context: Context, list: ListArtifact, ops: org.json.JSONArray, sinceHlc: String = "", actorId: String) {
+        val body = JSONObject()
+            .put("actor_id", actorId)
+            .put("since_hlc", sinceHlc)
+            .put("ops", ops)
+        act(list) { sendDetail(context, "POST", "/api/lists/${list.id}/sync", body, ::parseList) }
     }
 
     suspend fun deleteItem(context: Context, list: ListArtifact, itemId: String) {
@@ -662,15 +690,24 @@ object CollabRepository {
                 val item = itemsJson.optJSONObject(i) ?: continue
                 val id = item.optString("id")
                 if (id.isBlank()) continue
+                val rawKind = item.optString("type").ifBlank { item.optString("kind") }.lowercase()
+                val rowKind = when (rawKind) {
+                    "bullet" -> "bullet"
+                    "paragraph", "note", "text" -> "paragraph"
+                    else -> "checkbox"
+                }
                 add(
                     ListEntry(
                         id,
-                        item.optString("text"),
-                        item.bool("done"),
-                        strings(item.optJSONArray("labels")),
+                        item.optString("content").ifBlank { item.optString("text") },
+                        item.bool("done") || item.bool("isChecked"),
+                        strings(item.optJSONArray("tags") ?: item.optJSONArray("labels")),
                         item.optCleanString("notes"),
                         item.optCleanString("due_at"),
                         item.optCleanString("remind_at"),
+                        rowKind,
+                        item.optInt("depth"),
+                        item.optString("order").ifBlank { item.optString("order_key") },
                     ),
                 )
             }

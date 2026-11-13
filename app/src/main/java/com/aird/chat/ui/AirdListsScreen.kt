@@ -4,12 +4,9 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,13 +34,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -88,7 +82,6 @@ import com.aird.chat.model.ListSummary
 import com.aird.session.Session
 import com.aird.ui.LocalAirdReducedMotion
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -118,12 +111,14 @@ fun AirdListsScreen(onBack: () -> Unit) {
     var editing by remember { mutableStateOf<ListEntry?>(null) }
     var removing by remember { mutableStateOf<ListEntry?>(null) }
     var draft by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf("") }
+    var draftKind by remember { mutableStateOf("checkbox") }
     var due by remember { mutableStateOf("") }
-    var showNote by remember { mutableStateOf(false) }
+    var noteId by remember { mutableStateOf("") }
+    var focusedId by remember { mutableStateOf("") }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     suspend fun loadBoard() {
-        val board = CollabRepository.listBoard(context, query.trim())
+        val board = CollabRepository.listBoard(context, "")
         lists = board.lists.distinctBy { it.id }
         groups = board.groups.distinctBy { it.id }
         ListAlarms.sync(context, board.reminders)
@@ -156,8 +151,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
             }
         }
     }
-    LaunchedEffect(query) {
-        if (query.isNotEmpty()) delay(220)
+    LaunchedEffect(Unit) {
         try {
             loadBoard()
             error = ""
@@ -169,9 +163,10 @@ fun AirdListsScreen(onBack: () -> Unit) {
     }
     LaunchedEffect(openId) {
         draft = ""
-        note = ""
+        draftKind = "checkbox"
         due = ""
-        showNote = false
+        noteId = ""
+        focusedId = ""
         if (openId.isNotBlank()) {
             try {
                 CollabRepository.refresh(context, "list", openId, "")
@@ -182,8 +177,9 @@ fun AirdListsScreen(onBack: () -> Unit) {
             }
         }
     }
-    BackHandler(enabled = openId.isNotEmpty() || creating || grouping || organizing || movingId.isNotEmpty()) {
+    BackHandler(enabled = noteId.isNotEmpty() || openId.isNotEmpty() || creating || grouping || organizing || movingId.isNotEmpty()) {
         when {
+            noteId.isNotEmpty() -> noteId = ""
             creating -> creating = false
             grouping -> grouping = false
             organizing -> organizing = false
@@ -192,12 +188,15 @@ fun AirdListsScreen(onBack: () -> Unit) {
         }
     }
 
+    val needle = query.trim()
     val shown = lists.filter { row ->
-        when (folder) {
+        val inFolder = when (folder) {
             "" -> true
             "none" -> row.groupId.isBlank()
             else -> row.groupId == folder
         }
+        val matches = needle.isEmpty() || row.title.contains(needle, true) || row.search.contains(needle, true)
+        inFolder && matches
     }
     val moving = lists.firstOrNull { it.id == movingId }
 
@@ -213,7 +212,13 @@ fun AirdListsScreen(onBack: () -> Unit) {
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { if (openId.isBlank()) onBack() else openId = "" }) {
+                    IconButton(onClick = {
+                        when {
+                            noteId.isNotEmpty() -> noteId = ""
+                            openId.isNotBlank() -> openId = ""
+                            else -> onBack()
+                        }
+                    }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -243,16 +248,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
                 targetState = openId.isBlank(),
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 transitionSpec = {
-                    if (reduced) {
-                        fadeIn(tween(120)) togetherWith fadeOut(tween(80))
-                    } else {
-                        val forward = targetState.not()
-                        val dir = if (forward) 1 else -1
-                        ContentTransform(
-                            slideInHorizontally(tween(260)) { it * dir } + fadeIn(tween(160)),
-                            slideOutHorizontally(tween(220)) { -it * dir } + fadeOut(tween(120)),
-                        )
-                    }
+                    fadeIn(tween(if (reduced) 0 else 60)) togetherWith fadeOut(tween(if (reduced) 0 else 60))
                 },
                 label = "lists",
             ) { index ->
@@ -299,7 +295,8 @@ fun AirdListsScreen(onBack: () -> Unit) {
                             }
                         } else {
                             LazyColumn(
-                                Modifier.weight(1f).fillMaxWidth(),
+                                state = listState,
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
@@ -325,12 +322,19 @@ fun AirdListsScreen(onBack: () -> Unit) {
                             list = list,
                             groups = groups,
                             draft = draft,
-                            note = note,
                             due = due,
-                            showNote = showNote,
+                            draftKind = draftKind,
+                            focusedId = focusedId,
                             onDraft = { draft = it },
-                            onNote = { note = it },
-                            onShowNote = { showNote = !showNote },
+                            onDraftKind = { draftKind = it },
+                            onFocus = { focusedId = it },
+                            onOpenNote = { editing = list.items.firstOrNull { row -> row.id == it } },
+                            onKind = { item, kind ->
+                                work {
+                                    val text = if (item.text.isBlank()) " " else item.text
+                                    CollabRepository.updateItem(context, list, item, text, item.labels, item.notes, item.dueAt, kind)
+                                }
+                            },
                             onDue = { pickDateTime(context) { due = it } },
                             onClearDue = { due = "" },
                             onMove = { movingId = list.id },
@@ -368,11 +372,16 @@ fun AirdListsScreen(onBack: () -> Unit) {
                             },
                             onAdd = {
                                 work {
-                                    CollabRepository.addItem(context, list, draft, notes = note, dueAt = due)
+                                    CollabRepository.addItem(
+                                        context,
+                                        list,
+                                        if (draft.isBlank()) " " else draft,
+                                        notes = "",
+                                        dueAt = if (draftKind == "checkbox") due else "",
+                                        kind = draftKind,
+                                    )
                                     draft = ""
-                                    note = ""
                                     due = ""
-                                    showNote = false
                                     loadBoard()
                                 }
                             },
@@ -517,8 +526,7 @@ private fun ListCard(row: ListSummary, groups: List<ListGroup>, onOpen: () -> Un
                     )
                 }
                 Text(
-                    listOf(
-                        if (row.style == "bullet") "Notes" else "To-do",
+                        listOf(
                         groupName,
                         if (row.total > 0) "${row.done}/${row.total}" else "",
                         friendlyTime(row.nextDue),
@@ -545,12 +553,14 @@ private fun ListDetail(
     list: ListArtifact,
     groups: List<ListGroup>,
     draft: String,
-    note: String,
     due: String,
-    showNote: Boolean,
+    draftKind: String,
+    focusedId: String,
     onDraft: (String) -> Unit,
-    onNote: (String) -> Unit,
-    onShowNote: () -> Unit,
+    onDraftKind: (String) -> Unit,
+    onFocus: (String) -> Unit,
+    onOpenNote: (String) -> Unit,
+    onKind: (ListEntry, String) -> Unit,
     onDue: () -> Unit,
     onClearDue: () -> Unit,
     onMove: () -> Unit,
@@ -596,7 +606,7 @@ private fun ListDetail(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             FilterChip(selected = true, onClick = onMove, label = { Text(groupName) })
-            if (list.checklist && list.total > 0) {
+            if (list.total > 0) {
                 Text(
                     "${list.done}/${list.total}",
                     modifier = Modifier.padding(start = 10.dp),
@@ -607,7 +617,25 @@ private fun ListDetail(
         }
         LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp)) {
             items(items, key = { "item:${it.id}" }) { item ->
-                ItemRow(list.checklist, item, items.firstOrNull()?.id == item.id, items.lastOrNull()?.id == item.id, onCheck, onEdit, onRemove, onUp, onDown)
+                ItemRow(
+                    item,
+                    focusedId == item.id,
+                    items.firstOrNull()?.id == item.id,
+                    items.lastOrNull()?.id == item.id,
+                    onCheck,
+                    onEdit,
+                    onRemove,
+                    onUp,
+                    onDown,
+                    onFocus,
+                    onOpenNote,
+                    onKind,
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("checkbox" to "Check", "bullet" to "Bullet", "paragraph" to "Text").forEach { (kind, label) ->
+                FilterChip(selected = draftKind == kind, onClick = { onDraftKind(kind) }, label = { Text(label) })
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -615,25 +643,18 @@ private fun ListDetail(
                 value = draft,
                 onValueChange = onDraft,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Add an item") },
+                placeholder = { Text(if (draftKind == "paragraph") "Text" else "Add an item") },
                 singleLine = true,
             )
-            IconButton(onClick = onAdd, enabled = draft.isNotBlank()) {
+            IconButton(onClick = onAdd, enabled = draft.isNotBlank() || draftKind == "paragraph") {
                 Icon(Icons.Default.Add, contentDescription = "Add item")
             }
         }
-        Row {
-            TextButton(onClick = onShowNote) { Text(if (showNote || note.isNotBlank()) "Note" else "Add note") }
-            TextButton(onClick = onDue) { Text(if (due.isBlank()) "Due" else friendlyTime(due)) }
-            if (due.isNotBlank()) TextButton(onClick = onClearDue) { Text("Clear") }
-        }
-        if (showNote || note.isNotBlank()) {
-            OutlinedTextField(
-                value = note,
-                onValueChange = onNote,
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                placeholder = { Text("Note") },
-            )
+        if (draftKind == "checkbox") {
+            Row {
+                TextButton(onClick = onDue) { Text(if (due.isBlank()) "Due" else friendlyTime(due)) }
+                if (due.isNotBlank()) TextButton(onClick = onClearDue) { Text("Clear") }
+            }
         }
     }
 }
@@ -666,8 +687,8 @@ private fun tagColor(raw: String): Color? {
 
 @Composable
 private fun ItemRow(
-    checklist: Boolean,
     item: ListEntry,
+    focused: Boolean,
     first: Boolean,
     last: Boolean,
     onCheck: (ListEntry, Boolean) -> Unit,
@@ -675,37 +696,40 @@ private fun ItemRow(
     onRemove: (ListEntry) -> Unit,
     onUp: (ListEntry) -> Unit,
     onDown: (ListEntry) -> Unit,
+    onFocus: (String) -> Unit,
+    onOpenNote: (String) -> Unit,
+    onKind: (ListEntry, String) -> Unit,
 ) {
-    var menu by remember(item.id) { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        if (checklist) {
-            Checkbox(checked = item.done, onCheckedChange = { onCheck(item, it) })
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp * item.depth, top = 4.dp, bottom = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (item.type == "checkbox") {
+                Checkbox(checked = item.done, onCheckedChange = { onCheck(item, it) })
+            } else if (item.type == "bullet") {
+                Text("•", modifier = Modifier.padding(horizontal = 12.dp))
+            }
+            Column(
+                Modifier.weight(1f).clickable { onEdit(item) }.padding(vertical = 8.dp),
+            ) {
+                Text(
+                    item.text,
+                    textDecoration = if (item.type == "checkbox" && item.done) TextDecoration.LineThrough else null,
+                )
+                if (item.type == "checkbox" && item.dueAt.isNotBlank()) {
+                    Text(friendlyTime(item.dueAt), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            TextButton(onClick = { onFocus(item.id) }) { Text("Type") }
+            if (!first) TextButton(onClick = { onUp(item) }) { Text("Up") }
+            if (!last) TextButton(onClick = { onDown(item) }) { Text("Down") }
+            TextButton(onClick = { onRemove(item) }) { Text("×") }
         }
-        Column(Modifier.weight(1f).clickable { onEdit(item) }.padding(vertical = 8.dp)) {
-            Text(
-                item.text,
-                textDecoration = if (item.done) TextDecoration.LineThrough else null,
-                color = if (item.done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-            )
-            val line = listOf(friendlyTime(item.dueAt), item.notes).filter { it.isNotBlank() }
-            if (line.isNotEmpty()) {
-                Text(line.joinToString(" · "), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3)
+        if (focused) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("checkbox" to "Check", "bullet" to "Bullet", "paragraph" to "Text").forEach { (kind, label) ->
+                    FilterChip(selected = item.kind == kind, onClick = { onKind(item, kind) }, label = { Text(label) })
+                }
             }
         }
-        BoxMenu(menu, { menu = true }, { menu = false }) {
-            if (!first) DropdownMenuItem(text = { Text("Move up") }, onClick = { menu = false; onUp(item) })
-            if (!last) DropdownMenuItem(text = { Text("Move down") }, onClick = { menu = false; onDown(item) })
-            DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; onEdit(item) })
-            DropdownMenuItem(text = { Text("Remove") }, onClick = { menu = false; onRemove(item) })
-        }
-    }
-}
-
-@Composable
-private fun BoxMenu(open: Boolean, onOpen: () -> Unit, onDismiss: () -> Unit, content: @Composable () -> Unit) {
-    androidx.compose.foundation.layout.Box {
-        IconButton(onClick = onOpen) { Icon(Icons.Default.MoreVert, contentDescription = "Item actions") }
-        DropdownMenu(expanded = open, onDismissRequest = onDismiss) { content() }
     }
 }
 
@@ -804,7 +828,6 @@ private fun ListCreateDialog(
 ) {
     var title by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
-    var checklist by remember { mutableStateOf(true) }
     var groupId by remember { mutableStateOf(if (folder == "none") "" else folder) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -817,7 +840,6 @@ private fun ListCreateDialog(
             ) {
                 OutlinedTextField(title, { title = it }, placeholder = { Text("Title") })
                 OutlinedTextField(notes, { notes = it }, placeholder = { Text("Description") })
-                TextButton(onClick = { checklist = !checklist }) { Text(if (checklist) "To-do" else "Notes") }
                 Text("File under", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 TextButton(onClick = { groupId = "" }) { Text(if (groupId.isBlank()) "• Ungrouped" else "Ungrouped") }
                 groups.forEach { group ->
@@ -829,7 +851,7 @@ private fun ListCreateDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onCreate(title, notes, if (checklist) "todo" else "bullet", groupId) },
+                onClick = { onCreate(title, notes, "todo", groupId) },
                 enabled = title.isNotBlank(),
             ) { Text("Create") }
         },
@@ -841,7 +863,6 @@ private fun ListCreateDialog(
 private fun ListEditDialog(list: ListArtifact, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
     var title by remember(list.id) { mutableStateOf(list.title) }
     var notes by remember(list.id) { mutableStateOf(list.notes) }
-    var checklist by remember(list.id) { mutableStateOf(list.checklist) }
     val mine = list.organizer.equals(Session.username.value, true)
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -855,11 +876,10 @@ private fun ListEditDialog(list: ListArtifact, onDismiss: () -> Unit, onSave: (S
                 if (!mine) Text("Only the owner can change the title.", fontSize = 13.sp)
                 OutlinedTextField(title, { title = it }, enabled = mine, placeholder = { Text("Title") })
                 OutlinedTextField(notes, { notes = it }, enabled = mine, placeholder = { Text("Description") })
-                TextButton(onClick = { checklist = !checklist }, enabled = mine) { Text(if (checklist) "To-do" else "Notes") }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(title, notes, if (checklist) "todo" else "bullet") }, enabled = mine && title.isNotBlank()) { Text("Save") }
+            TextButton(onClick = { onSave(title, notes, list.style) }, enabled = mine && title.isNotBlank()) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

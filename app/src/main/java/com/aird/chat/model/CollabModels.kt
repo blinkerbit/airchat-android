@@ -34,7 +34,16 @@ data class ListEntry(
     val notes: String = "",
     val dueAt: String = "",
     val remindAt: String = "",
-)
+    val kind: String = "checkbox",
+    val depth: Int = 0,
+    val orderKey: String = "",
+) {
+    val type: String get() = when (kind) {
+        "bullet" -> "bullet"
+        "paragraph", "note", "text" -> "paragraph"
+        else -> "checkbox"
+    }
+}
 
 data class ListDraft(
     val title: String,
@@ -62,6 +71,7 @@ data class ListSummary(
     val active: Boolean,
     val organizer: String = "",
     val tags: List<CollabTag> = emptyList(),
+    val search: String = "",
 )
 
 data class PollSummary(

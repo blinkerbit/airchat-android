@@ -43,6 +43,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -312,7 +313,7 @@ private fun ListBody(
     var labels by remember(list.id) { mutableStateOf("") }
     var editing by remember(list.id) { mutableStateOf<ListEntry?>(null) }
     val shown = if (expanded) list.items else list.items.take(6)
-    if (list.checklist && list.total > 0) {
+    if (list.total > 0) {
         LinearProgressIndicator(
             progress = { list.done.toFloat() / list.total.toFloat() },
             modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp).height(4.dp).clip(RoundedCornerShape(99.dp)),
@@ -323,7 +324,7 @@ private fun ListBody(
     if (shown.isEmpty()) Text("No items yet.", color = fg.copy(alpha = 0.7f), fontSize = 13.sp)
     shown.forEach { item ->
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            if (list.checklist) {
+            if (item.type == "checkbox") {
                 Checkbox(
                     checked = item.done,
                     onCheckedChange = { checked ->
@@ -336,15 +337,17 @@ private fun ListBody(
                         checkmarkColor = if (onPrimary) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onPrimary,
                     ),
                 )
-            } else {
+            } else if (item.type == "bullet") {
                 Text("•", color = accent, modifier = Modifier.padding(horizontal = 10.dp))
             }
-            Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+            Column(Modifier.weight(1f).padding(start = 12.dp * item.depth, top = 4.dp, bottom = 4.dp)) {
                 Text(
-                    item.text,
+                    item.text.lineSequence().firstOrNull().orEmpty(),
                     color = fg,
                     fontSize = 14.sp,
-                    textDecoration = if (item.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textDecoration = if (item.type == "checkbox" && item.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
                     modifier = if (expanded) Modifier.clickable { editing = item } else Modifier,
                 )
                 val dueText = friendlyTime(item.dueAt)

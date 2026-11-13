@@ -52,6 +52,8 @@ object AirdTelecom {
     private var registered = false
     private var reporting = false
     private var connection: AirdCallConnection? = null
+    private var session = 0
+    private var endedSession = 0
 
     fun register(context: Context) {
         if (registered) return
@@ -82,6 +84,7 @@ object AirdTelecom {
             }
             val app = context.applicationContext
             if (reporting) return@onMain
+            session += 1
             register(app)
             val telecom = app.getSystemService(TelecomManager::class.java) ?: return@onMain
             val extras = Bundle().apply {
@@ -104,6 +107,7 @@ object AirdTelecom {
         onMain {
             val app = context.applicationContext
             if (connection != null || reporting) return@onMain
+            session += 1
             register(app)
             val telecom = app.getSystemService(TelecomManager::class.java) ?: return@onMain
             val extras = Bundle().apply {
@@ -125,6 +129,7 @@ object AirdTelecom {
         onMain {
             val app = context.applicationContext
             if (connection != null || reporting) return@onMain
+            session += 1
             register(app)
             val telecom = app.getSystemService(TelecomManager::class.java) ?: return@onMain
             val extras = Bundle().apply {
@@ -142,7 +147,7 @@ object AirdTelecom {
 
     fun attach(context: Context, request: ConnectionRequest?, outgoing: Boolean): Connection {
         val call = AirdCallConnection(context.applicationContext, request)
-        if (CallController.snapshot.value.phase == CallPhase.Idle) {
+        if (session <= endedSession || CallController.snapshot.value.phase == CallPhase.Idle) {
             reporting = false
             call.release(DisconnectCause.CANCELED)
             return call
@@ -176,10 +181,11 @@ object AirdTelecom {
 
     fun end(cause: Int) {
         onMain {
+            endedSession = session
             reporting = false
-            val current = connection ?: return@onMain
+            val current = connection
             connection = null
-            current.release(cause)
+            current?.release(cause)
         }
     }
 
@@ -229,8 +235,16 @@ private class AirdCallConnection(
     fun release(cause: Int) {
         if (released) return
         released = true
+        AirdTelecom.drop(this)
+        try {
+            videoState = VideoProfile.STATE_AUDIO_ONLY
+        } catch (_: Exception) {
+        }
         try {
             setDisconnected(DisconnectCause(cause))
+        } catch (_: Exception) {
+        }
+        try {
             destroy()
         } catch (_: Exception) {
         }

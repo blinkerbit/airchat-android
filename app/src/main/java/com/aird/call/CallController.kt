@@ -871,7 +871,7 @@ object CallController {
             }
             if (!cameraOn && hint.isEmpty()) hint = "Camera is off. Allow it in Settings to share video."
         }
-        if (generation != gen) return
+        if (generation != gen || _snapshot.value.phase == CallPhase.Idle) return
         val output = _snapshot.value.output.ifEmpty { if (video) "speaker" else "earpiece" }
         val playback = _snapshot.value.playbackId.ifEmpty { output }
         _snapshot.value = _snapshot.value.copy(
@@ -888,6 +888,7 @@ object CallController {
             }
         }
         CallDevices.reapply(context, next)
+        if (generation != gen || _snapshot.value.phase == CallPhase.Idle) return
         AirdConnectionService.showInCall(context, _snapshot.value.peer.ifEmpty { "Aird Chat" }, video, cameraOn)
         syncLocalVideo(next, cameraOn)
         watchLocalVideo(next, gen)
