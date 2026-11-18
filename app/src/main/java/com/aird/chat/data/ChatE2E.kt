@@ -27,8 +27,9 @@ object ChatE2E {
 
     suspend fun prepare(context: Context, user: String) = lock.withLock {
         val gen = generation
-        username = user
+        if (user.isNotBlank()) username = user
         if (identity != null) return@withLock
+        if (username.isBlank()) return@withLock
         val response = try {
             AirdHttp.get(context, "/api/chat/e2e/identity")
         } catch (_: Exception) {
@@ -45,7 +46,7 @@ object ChatE2E {
             val bundle = JSONObject()
                 .put("v", 1)
                 .put("kind", "aird-chat-e2e-identity")
-                .put("username", user)
+                .put("username", username)
                 .put("publicJwk", JSONObject(fresh.publicJson()))
                 .put("privateJwk", JSONObject(fresh.privateJson()))
                 .put("kid", fresh.kid())
@@ -60,11 +61,21 @@ object ChatE2E {
 
     suspend fun decrypt(context: Context, convId: String, payload: JSONObject?): String? {
         if (payload == null || payload.optInt("v") != 1) return null
+        val iv = payload.optString("iv")
+        val ct = payload.optString("ct")
+        if (iv.isEmpty() || ct.isEmpty()) return null
         val raw = keyFor(context, convId) ?: return null
         return try {
-            ChatCrypto.decrypt(raw, convId, payload.optString("iv"), payload.optString("ct"))
+            ChatCrypto.decrypt(raw, convId, iv, ct)
         } catch (_: Exception) {
-            null
+            clearKey(convId)
+            val fresh = keyFor(context, convId) ?: return null
+            if (fresh.contentEquals(raw)) return null
+            try {
+                ChatCrypto.decrypt(fresh, convId, iv, ct)
+            } catch (_: Exception) {
+                null
+            }
         }
     }
 
@@ -76,7 +87,6 @@ object ChatE2E {
 
     private suspend fun keyFor(context: Context, convId: String): ByteArray? = lock.withLock {
         keys[convId]?.let { return@withLock it }
-        val me = identity ?: return@withLock null
         val response = try {
             AirdHttp.get(context, "/api/chat/conversations/$convId/e2e")
         } catch (err: Exception) {
@@ -87,9 +97,15 @@ object ChatE2E {
         // random key nobody else can unwrap.
         if (!response.ok) return@withLock null
         val state = response.json()
+        val serverKey = state.optString("conv_key")
+        ChatCrypto.decodeKey(serverKey)?.let {
+            keys[convId] = it
+            return@withLock it
+        }
+        val me = identity ?: return@withLock null
         val wraps = state.optJSONObject("wraps") ?: JSONObject()
         val pubs = state.optJSONObject("keys") ?: JSONObject()
-        val mine = wraps.optJSONObject(username)
+        val mine = wrapFor(wraps, username)
         var raw: ByteArray? = null
         if (mine != null) {
             val epk = mine.optJSONObject("epk")
@@ -106,7 +122,8 @@ object ChatE2E {
                 null
             }
         }
-        if (raw == null && wraps.length() > 0) return@withLock null
+        val existing = serverKey.isNotEmpty() || wraps.length() > 0
+        if (raw == null && existing) return@withLock null
         val minted = raw == null
         if (raw == null) raw = ChatCrypto.randomKey()
         val next = JSONObject()
@@ -137,18 +154,34 @@ object ChatE2E {
             changed = true
         }
         // A key nobody can unwrap is worse than no key.
+        val encoded = ChatCrypto.encodeKey(raw)
         if (minted && next.length() == 0) return@withLock null
-        if (changed && next.length() > 0) {
+        val publishKey = minted || serverKey != encoded
+        if (changed || publishKey) {
+            val body = JSONObject()
+            if (next.length() > 0) body.put("wraps", next)
+            if (publishKey) body.put("conv_key", encoded)
             val saved = try {
-                AirdHttp.send(context, "/api/chat/conversations/$convId/e2e", "PUT", JSONObject().put("wraps", next))
+                AirdHttp.send(context, "/api/chat/conversations/$convId/e2e", "PUT", body)
             } catch (err: Exception) {
                 if (err is kotlinx.coroutines.CancellationException) throw err
-                return@withLock null
+                null
             }
-            if (!saved.ok) return@withLock null
+            if (minted && (saved == null || !saved.ok)) return@withLock null
         }
         keys[convId] = raw
         raw
+    }
+
+    private fun wrapFor(wraps: JSONObject, user: String): JSONObject? {
+        if (user.isEmpty()) return null
+        wraps.optJSONObject(user)?.let { return it }
+        val names = wraps.keys()
+        while (names.hasNext()) {
+            val name = names.next()
+            if (name.equals(user, true)) return wraps.optJSONObject(name)
+        }
+        return null
     }
 
     fun currentUsername(): String = username

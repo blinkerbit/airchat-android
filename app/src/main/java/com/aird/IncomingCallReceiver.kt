@@ -17,14 +17,14 @@ class IncomingCallReceiver : BroadcastReceiver() {
                     intent.getStringExtra(KEY_FROM).orEmpty(),
                 )
                 CallController.accept(context)
-                val open = Intent(context, MainActivity::class.java).apply {
+                val open = InternalLaunch.stamp(context, Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                     putExtra("action", "accept_call")
                     putExtra("conversation_id", intent.getStringExtra(KEY_CONVERSATION).orEmpty())
                     putExtra("call_id", intent.getStringExtra(KEY_CALL).orEmpty())
                     putExtra("call_mode", intent.getStringExtra(KEY_MODE).orEmpty())
                     putExtra("call_from", intent.getStringExtra(KEY_FROM).orEmpty())
-                }
+                })
                 openFromBackground(context, open)
             }
             ACTION_DECLINE -> {
@@ -41,10 +41,10 @@ class IncomingCallReceiver : BroadcastReceiver() {
             ACTION_MUTE -> CallController.toggleMute()
             ACTION_EXPAND -> {
                 CallController.expand()
-                val open = Intent(context, MainActivity::class.java).apply {
+                val open = InternalLaunch.stamp(context, Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP
                     putExtra("action", "expand_call")
-                }
+                })
                 openFromBackground(context, open)
             }
         }

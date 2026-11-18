@@ -218,6 +218,11 @@ fun AirdSuperSearchScreen(
             return
         }
         val server = ServerStore.get(context)
+        if (!com.aird.security.HostPolicy.isSafeRemoteUrl(server)) {
+            errorLine = "Server address is not allowed."
+            emptyLine = ""
+            return
+        }
         val wsUrl = server.replace("https://", "wss://").replace("http://", "ws://") + "/search/ws"
         val payload = JSONObject()
             .put("pattern", patternValue)

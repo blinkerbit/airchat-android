@@ -4,17 +4,20 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
@@ -62,7 +66,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -73,6 +79,8 @@ import com.aird.chat.data.ChatRepository
 import com.aird.chat.data.CollabException
 import com.aird.chat.data.CollabRepository
 import com.aird.chat.data.ListAlarms
+import com.aird.core.model.Outline
+import com.aird.transfer.ListCatchUpWorker
 import com.aird.chat.model.CollabTag
 import com.aird.chat.model.ListArtifact
 import com.aird.chat.model.ListDraft
@@ -81,6 +89,10 @@ import com.aird.chat.model.ListGroup
 import com.aird.chat.model.ListSummary
 import com.aird.session.Session
 import com.aird.ui.LocalAirdReducedMotion
+import com.aird.ui.airdHide
+import com.aird.ui.airdInset
+import com.aird.ui.airdPush
+import com.aird.ui.airdReveal
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -93,7 +105,6 @@ import java.util.Calendar
 fun AirdListsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val reduced = LocalAirdReducedMotion.current
     var lists by remember { mutableStateOf(listOf<ListSummary>()) }
     var groups by remember { mutableStateOf(listOf<ListGroup>()) }
     var query by remember { mutableStateOf("") }
@@ -116,6 +127,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
     var noteId by remember { mutableStateOf("") }
     var focusedId by remember { mutableStateOf("") }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val reduced = LocalAirdReducedMotion.current
 
     suspend fun loadBoard() {
         val board = CollabRepository.listBoard(context, "")
@@ -167,8 +179,9 @@ fun AirdListsScreen(onBack: () -> Unit) {
         due = ""
         noteId = ""
         focusedId = ""
-        if (openId.isNotBlank()) {
+                if (openId.isNotBlank()) {
             try {
+                ListCatchUpWorker.schedule(context, openId)
                 CollabRepository.refresh(context, "list", openId, "")
             } catch (err: CancellationException) {
                 throw err
@@ -236,7 +249,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            if (error.isNotEmpty()) {
+            AnimatedVisibility(visible = error.isNotEmpty(), enter = airdReveal(), exit = airdHide()) {
                 Text(
                     error,
                     color = MaterialTheme.colorScheme.error,
@@ -247,9 +260,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
             AnimatedContent(
                 targetState = openId.isBlank(),
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                transitionSpec = {
-                    fadeIn(tween(if (reduced) 0 else 60)) togetherWith fadeOut(tween(if (reduced) 0 else 60))
-                },
+                transitionSpec = { airdPush(forward = !targetState, reduced = reduced) },
                 label = "lists",
             ) { index ->
                 if (index) {
@@ -301,7 +312,13 @@ fun AirdListsScreen(onBack: () -> Unit) {
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 items(shown, key = { "list:${it.id}" }) { row ->
-                                    ListCard(row, groups, onOpen = { openId = row.id }, onMove = { movingId = row.id })
+                                    ListCard(
+                                        row,
+                                        groups,
+                                        onOpen = { openId = row.id },
+                                        onMove = { movingId = row.id },
+                                        modifier = Modifier.animateItem(),
+                                    )
                                 }
                             }
                         }
@@ -333,6 +350,41 @@ fun AirdListsScreen(onBack: () -> Unit) {
                                 work {
                                     val text = if (item.text.isBlank()) " " else item.text
                                     CollabRepository.updateItem(context, list, item, text, item.labels, item.notes, item.dueAt, kind)
+                                }
+                            },
+                            onIndent = { rows ->
+                                work {
+                                    CollabRepository.moveDepths(context, list, depthUpdates(list.items, rows.map { it.id }.toSet(), indent = true))
+                                }
+                            },
+                            onOutdent = { rows ->
+                                work {
+                                    CollabRepository.moveDepths(context, list, depthUpdates(list.items, rows.map { it.id }.toSet(), indent = false))
+                                }
+                            },
+                            onMarkDone = { rows ->
+                                work {
+                                    rows.filter { it.type == "checkbox" && !it.done }.forEach { item ->
+                                        CollabRepository.setDone(context, list, item, true)
+                                    }
+                                    loadBoard()
+                                }
+                            },
+                            onDeleteMany = { rows ->
+                                work {
+                                    rows.forEach { CollabRepository.deleteItem(context, list, it.id) }
+                                    loadBoard()
+                                }
+                            },
+                            onTagMany = { rows, label ->
+                                work {
+                                    val name = label.trim().removePrefix("#")
+                                    if (name.isEmpty()) return@work
+                                    rows.forEach { item ->
+                                        val labels = (item.labels + name).distinct()
+                                        CollabRepository.updateItem(context, list, item, item.text.ifBlank { " " }, labels, item.notes, item.dueAt, item.kind)
+                                    }
+                                    loadBoard()
                                 }
                             },
                             onDue = { pickDateTime(context) { due = it } },
@@ -490,10 +542,16 @@ fun AirdListsScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun ListCard(row: ListSummary, groups: List<ListGroup>, onOpen: () -> Unit, onMove: () -> Unit) {
+private fun ListCard(
+    row: ListSummary,
+    groups: List<ListGroup>,
+    onOpen: () -> Unit,
+    onMove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val groupName = groups.firstOrNull { it.id == row.groupId }?.name ?: "Ungrouped"
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
     ) {
@@ -548,6 +606,7 @@ private fun ListCard(row: ListSummary, groups: List<ListGroup>, onOpen: () -> Un
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ListDetail(
     list: ListArtifact,
@@ -561,6 +620,11 @@ private fun ListDetail(
     onFocus: (String) -> Unit,
     onOpenNote: (String) -> Unit,
     onKind: (ListEntry, String) -> Unit,
+    onIndent: (List<ListEntry>) -> Unit,
+    onOutdent: (List<ListEntry>) -> Unit,
+    onMarkDone: (List<ListEntry>) -> Unit,
+    onDeleteMany: (List<ListEntry>) -> Unit,
+    onTagMany: (List<ListEntry>, String) -> Unit,
     onDue: () -> Unit,
     onClearDue: () -> Unit,
     onMove: () -> Unit,
@@ -573,6 +637,16 @@ private fun ListDetail(
 ) {
     val groupName = groups.firstOrNull { it.id == list.groupId }?.name ?: "Ungrouped"
     val items = list.items.distinctBy { it.id }
+    var selected by remember(list.id) { mutableStateOf(setOf<String>()) }
+    var activeTag by remember(list.id) { mutableStateOf("") }
+    var tagging by remember(list.id) { mutableStateOf(false) }
+    var tagName by remember(list.id) { mutableStateOf("") }
+    val haptic = LocalHapticFeedback.current
+    val tags = items.flatMap { it.labels }.map { it.trim().removePrefix("#") }.filter { it.isNotEmpty() }.distinct()
+    val visible = if (activeTag.isBlank()) items else items.filter { row ->
+        activeTag in row.labels.map { label -> label.removePrefix("#") }
+    }
+    val chosen = items.filter { it.id in selected }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         if (list.organizer.isNotBlank()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
@@ -615,13 +689,38 @@ private fun ListDetail(
                 )
             }
         }
+        AnimatedVisibility(visible = selected.isNotEmpty(), enter = airdReveal(), exit = airdHide()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = { selected = emptySet() }) { Text("Clear") }
+                Text("${selected.size} selected", modifier = Modifier.weight(1f))
+                TextButton(onClick = { selected = items.map { it.id }.toSet() }) { Text("Select all") }
+            }
+        }
+        if (tags.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                FilterChip(selected = activeTag.isEmpty(), onClick = { activeTag = "" }, label = { Text("All") })
+                tags.forEach { name ->
+                    val count = items.count { name in it.labels.map { label -> label.removePrefix("#") } }
+                    FilterChip(
+                        selected = activeTag == name,
+                        onClick = { activeTag = if (activeTag == name) "" else name },
+                        label = { Text("#$name ($count)") },
+                    )
+                }
+            }
+        }
         LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp)) {
-            items(items, key = { "item:${it.id}" }) { item ->
+            items(visible, key = { "item:${it.id}" }) { item ->
                 ItemRow(
                     item,
                     focusedId == item.id,
                     items.firstOrNull()?.id == item.id,
                     items.lastOrNull()?.id == item.id,
+                    item.id in selected,
+                    selected.isNotEmpty(),
                     onCheck,
                     onEdit,
                     onRemove,
@@ -629,8 +728,51 @@ private fun ListDetail(
                     onDown,
                     onFocus,
                     onOpenNote,
-                    onKind,
+                    onLongPress = { selected = selected + item.id },
+                    onToggle = {
+                        selected = if (item.id in selected) selected - item.id else selected + item.id
+                    },
+                    modifier = Modifier.animateItem(),
                 )
+            }
+        }
+        AnimatedVisibility(visible = selected.isNotEmpty(), enter = airdReveal(), exit = airdHide()) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { onMarkDone(chosen); selected = emptySet() }) { Text("Mark done") }
+                TextButton(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onIndent(chosen)
+                }) { Text("Indent") }
+                TextButton(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onOutdent(chosen)
+                }) { Text("Outdent") }
+                TextButton(onClick = { tagging = true }) { Text("Tag") }
+                TextButton(onClick = { onDeleteMany(chosen); selected = emptySet() }) { Text("Delete") }
+            }
+        }
+        val focused = items.firstOrNull { it.id == focusedId }
+        AnimatedVisibility(
+            visible = focused != null && selected.isEmpty() && WindowInsets.isImeVisible,
+            enter = airdReveal(),
+            exit = airdHide(),
+        ) {
+            val current = focused ?: return@AnimatedVisibility
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                listOf("checkbox" to "Checkbox", "bullet" to "Bullet", "paragraph" to "Text").forEach { (kind, label) ->
+                    TextButton(onClick = { onKind(current, kind) }) { Text(label) }
+                }
+            }
+            Row(Modifier.fillMaxWidth()) {
+                TextButton(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onOutdent(listOf(current))
+                }) { Text("Outdent") }
+                TextButton(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onIndent(listOf(current))
+                }) { Text("Indent") }
+                TextButton(onClick = { onFocus("") }) { Text("Hide") }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -650,12 +792,30 @@ private fun ListDetail(
                 Icon(Icons.Default.Add, contentDescription = "Add item")
             }
         }
-        if (draftKind == "checkbox") {
+        AnimatedVisibility(visible = draftKind == "checkbox", enter = airdReveal(), exit = airdHide()) {
             Row {
                 TextButton(onClick = onDue) { Text(if (due.isBlank()) "Due" else friendlyTime(due)) }
                 if (due.isNotBlank()) TextButton(onClick = onClearDue) { Text("Clear") }
             }
         }
+    }
+    if (tagging) {
+        AlertDialog(
+            onDismissRequest = { tagging = false },
+            title = { Text("Tag") },
+            text = {
+                OutlinedTextField(tagName, { tagName = it }, placeholder = { Text("sprint") })
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onTagMany(chosen, tagName)
+                    tagging = false
+                    selected = emptySet()
+                    tagName = ""
+                }, enabled = tagName.isNotBlank()) { Text("Add") }
+            },
+            dismissButton = { TextButton(onClick = { tagging = false }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -685,12 +845,15 @@ private fun tagColor(raw: String): Color? {
     return if (clean.length == 6) Color(0xFF000000 or value) else Color(value)
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ItemRow(
     item: ListEntry,
     focused: Boolean,
     first: Boolean,
     last: Boolean,
+    selected: Boolean,
+    selecting: Boolean,
     onCheck: (ListEntry, Boolean) -> Unit,
     onEdit: (ListEntry) -> Unit,
     onRemove: (ListEntry) -> Unit,
@@ -698,18 +861,28 @@ private fun ItemRow(
     onDown: (ListEntry) -> Unit,
     onFocus: (String) -> Unit,
     onOpenNote: (String) -> Unit,
-    onKind: (ListEntry, String) -> Unit,
+    onLongPress: () -> Unit,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(Modifier.fillMaxWidth().padding(start = 16.dp * item.depth, top = 4.dp, bottom = 4.dp)) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(start = airdInset(item.depth), top = 4.dp, bottom = 4.dp)
+            .combinedClickable(
+                onClick = { if (selecting) onToggle() else onEdit(item) },
+                onLongClick = onLongPress,
+            ),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (item.type == "checkbox") {
                 Checkbox(checked = item.done, onCheckedChange = { onCheck(item, it) })
             } else if (item.type == "bullet") {
                 Text("•", modifier = Modifier.padding(horizontal = 12.dp))
+            } else {
+                Text("¶", modifier = Modifier.padding(horizontal = 12.dp))
             }
-            Column(
-                Modifier.weight(1f).clickable { onEdit(item) }.padding(vertical = 8.dp),
-            ) {
+            Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
                 Text(
                     item.text,
                     textDecoration = if (item.type == "checkbox" && item.done) TextDecoration.LineThrough else null,
@@ -718,19 +891,31 @@ private fun ItemRow(
                     Text(friendlyTime(item.dueAt), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            TextButton(onClick = { onFocus(item.id) }) { Text("Type") }
-            if (!first) TextButton(onClick = { onUp(item) }) { Text("Up") }
-            if (!last) TextButton(onClick = { onDown(item) }) { Text("Down") }
-            TextButton(onClick = { onRemove(item) }) { Text("×") }
-        }
-        if (focused) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("checkbox" to "Check", "bullet" to "Bullet", "paragraph" to "Text").forEach { (kind, label) ->
-                    FilterChip(selected = item.kind == kind, onClick = { onKind(item, kind) }, label = { Text(label) })
-                }
+            AnimatedVisibility(visible = selecting, enter = fadeIn(), exit = fadeOut()) {
+                Text(if (selected) "✓" else " ")
+            }
+            if (!selecting) {
+                TextButton(onClick = { onFocus(item.id) }) { Text("Type") }
+                if (!first) TextButton(onClick = { onUp(item) }) { Text("Up") }
+                if (!last) TextButton(onClick = { onDown(item) }) { Text("Down") }
+                TextButton(onClick = { onRemove(item) }) { Text("×") }
             }
         }
     }
+}
+
+private fun depthUpdates(items: List<ListEntry>, ids: Set<String>, indent: Boolean): List<Pair<ListEntry, Int>> {
+    val depths = items.map { it.depth }.toMutableList()
+    val updates = mutableListOf<Pair<ListEntry, Int>>()
+    items.forEachIndexed { index, item ->
+        if (item.id !in ids) return@forEachIndexed
+        val next = if (indent) Outline.indentDepth(depths, index) else Outline.outdentDepth(depths, index)
+        if (next != null) {
+            depths[index] = next
+            updates += item to next
+        }
+    }
+    return updates
 }
 
 @Composable
@@ -765,8 +950,13 @@ private fun OrganizeDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (rename == null) "Groups" else "Rename group") },
         text = {
+            AnimatedContent(
+                targetState = rename == null,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "groups",
+            ) { listing ->
             Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                if (rename == null) {
+                if (listing) {
                     Text("Removing a group leaves the lists in Ungrouped.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(onClick = onNew) { Text("New group") }
                     groups.forEach { group ->
@@ -779,6 +969,7 @@ private fun OrganizeDialog(
                 } else {
                     OutlinedTextField(name, { name = it }, placeholder = { Text("Name") })
                 }
+            }
             }
         },
         confirmButton = {

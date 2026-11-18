@@ -170,7 +170,8 @@ object WindowFlags {
             (call.output.isEmpty() || call.output == "earpiece") &&
             (call.phase == CallPhase.Live || call.phase == CallPhase.Joining || call.phase == CallPhase.Outgoing)
         CallProximity.set(activity, earpiece)
-        if (earpiece) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val keepOn = call.phase != CallPhase.Idle && !earpiece && !inPip
+        if (keepOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 }

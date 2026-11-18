@@ -15,11 +15,11 @@ class MarkAsReadReceiver : BroadcastReceiver() {
         ChatNotifier.cancel(context, conversationId)
         val messageId = intent.getStringExtra(KEY_MESSAGE_ID).orEmpty()
         if (messageId.isEmpty()) {
-            val open = Intent(context, MainActivity::class.java).apply {
+            val open = InternalLaunch.stamp(context, Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra("action", "open_chat")
                 putExtra("conversation_id", conversationId)
-            }
+            })
             IncomingCallReceiver.openFromBackground(context, open)
             return
         }

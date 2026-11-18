@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -169,6 +170,8 @@ import com.aird.session.Session
 import com.aird.theme.AirdPalettes
 import com.aird.theme.ThemeStore
 import com.aird.ui.LocalAirdReducedMotion
+import com.aird.ui.airdEnter
+import com.aird.ui.airdExit
 import com.aird.ui.PressIconButton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -245,6 +248,8 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     val locked by AppLock.locked.collectAsState()
     val wantSearch by MainActivity.openSearch.collectAsState()
     val wantLists by MainActivity.openLists.collectAsState()
+    val secureRooms by EnhancedSecureHub.summaries.collectAsState()
+    val secureClose by EnhancedSecureHub.closeWindow.collectAsState()
     val openChat = conversations.firstOrNull { it.id == active }
     val wide = LocalConfiguration.current.screenWidthDp >= 720
     val overlay = files || lists || polls || search || shared || keys || enhanced || settings
@@ -262,7 +267,13 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
         }
     }
 
-    LaunchedEffect(Unit) { model.refresh() }
+    LaunchedEffect(Unit) {
+        EnhancedSecureHub.ensureStarted()
+        model.refresh()
+    }
+    LaunchedEffect(secureClose) {
+        if (secureClose > 0) enhanced = false
+    }
     DisposableEffect(Unit) {
         onDispose { MainActivity.secureChat.value = false }
     }
@@ -417,6 +428,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                 expanded = menu,
                                 reduced = reducedMenu,
                                 onDismiss = { menu = false },
+                                destructive = "Sign out",
                                 items = listOf(
                                     "Lists" to { files = false; polls = false; lists = true },
                                     "Polls" to { files = false; lists = false; polls = true },
@@ -424,7 +436,11 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                     "Super Search" to { search = true },
                                     "Shared with me" to { shared = true },
                                     "Key backup" to { keys = true },
-                                    "Enhanced secure" to { enhanced = true },
+                                    "Enhanced secure" to {
+                                        EnhancedSecureHub.reveal()
+                                        EnhancedSecureHub.ensureStarted()
+                                        enhanced = true
+                                    },
                                     "Settings" to { settings = true },
                                     "Sign out" to { Session.signOut(context) },
                                 ),
@@ -435,58 +451,46 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         IconButton(onClick = { chatSearchActive = !chatSearchActive; if (!chatSearchActive) chatSearchQuery = "" }) {
                             Icon(Icons.Default.Search, contentDescription = "Search messages")
                         }
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Menu") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(
-                                text = { Text(if (openChat?.muted == true) "Unmute" else "Mute") },
-                                onClick = {
-                                    menu = false
-                                    model.mute(openChat?.muted != true)
-                                },
-                            )
-                            val soundEnabled = ConversationPrefs.isSoundEnabled(context, active)
-                            DropdownMenuItem(
-                                text = { Text(if (soundEnabled) "Mute sound" else "Unmute sound") },
-                                onClick = {
-                                    menu = false
-                                    ConversationPrefs.setSoundEnabled(context, active, !soundEnabled)
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Clear on this device") },
-                                onClick = {
-                                    menu = false
-                                    model.clearLocalChat(active)
-                                },
-                            )
-                            if (openChat?.kind == "group") {
-                                DropdownMenuItem(
-                                    text = { Text("Group info") },
-                                    onClick = {
-                                        menu = false
-                                        groupInfo = true
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Add member") },
-                                    onClick = {
-                                        menu = false
-                                        addMember = true
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Leave group") },
-                                    onClick = {
-                                        menu = false
-                                        confirmLeave = true
-                                    },
+                        val reducedMenu = LocalAirdReducedMotion.current
+                        val menuTurn by animateFloatAsState(
+                            targetValue = if (menu) 90f else 0f,
+                            animationSpec = if (reducedMenu) tween(80) else spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+                            label = "chatMenuTurn",
+                        )
+                        val soundEnabled = ConversationPrefs.isSoundEnabled(context, active)
+                        Box {
+                            IconButton(onClick = { menu = !menu }) {
+                                Icon(
+                                    Icons.Default.MoreVert,
+                                    contentDescription = "Menu",
+                                    modifier = Modifier.graphicsLayer { rotationZ = if (reducedMenu) 0f else menuTurn },
                                 )
                             }
-                            DropdownMenuItem(
-                                text = { Text("Delete conversation", color = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    menu = false
-                                    confirmDeleteChat = true
+                            HomeOverflowMenu(
+                                expanded = menu,
+                                reduced = reducedMenu,
+                                onDismiss = { menu = false },
+                                destructive = "Delete conversation",
+                                items = buildList {
+                                    add((if (openChat?.muted == true) "Unmute" else "Mute") to { model.mute(openChat?.muted != true) })
+                                    add((if (soundEnabled) "Mute sound" else "Unmute sound") to {
+                                        ConversationPrefs.setSoundEnabled(context, active, !soundEnabled)
+                                    })
+                                    if (openChat?.kind == "dm" && openChat.peer.isNotBlank()) {
+                                        add("Enhanced Secure Chat" to {
+                                            EnhancedSecureHub.reveal()
+                                            EnhancedSecureHub.ensureStarted()
+                                            EnhancedSecureHub.start(openChat.peer)
+                                            enhanced = true
+                                        })
+                                    }
+                                    add("Clear on this device" to { model.clearLocalChat(active) })
+                                    if (openChat?.kind == "group") {
+                                        add("Group info" to { groupInfo = true })
+                                        add("Add member" to { addMember = true })
+                                        add("Leave group" to { confirmLeave = true })
+                                    }
+                                    add("Delete conversation" to { confirmDeleteChat = true })
                                 },
                             )
                         }
@@ -539,6 +543,18 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                         selectedId = active,
                         modifier = Modifier.weight(0.38f).fillMaxHeight(),
                         onBubbleDrag = { id, root, phase -> onListDrag(id, root, phase) },
+                        secure = secureRooms,
+                        onSecure = { roomId ->
+                            EnhancedSecureHub.reveal()
+                            EnhancedSecureHub.show(roomId)
+                            enhanced = true
+                        },
+                        onEnhanced = { peer ->
+                            EnhancedSecureHub.reveal()
+                            EnhancedSecureHub.ensureStarted()
+                            EnhancedSecureHub.start(peer)
+                            enhanced = true
+                        },
                     )
                     Box(Modifier.weight(0.62f).fillMaxHeight()) {
                         if (active.isEmpty()) {
@@ -573,6 +589,18 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                             model,
                             searchQuery,
                             onBubbleDrag = { id, root, phase -> onListDrag(id, root, phase) },
+                            secure = secureRooms,
+                            onSecure = { roomId ->
+                                EnhancedSecureHub.reveal()
+                                EnhancedSecureHub.show(roomId)
+                                enhanced = true
+                            },
+                            onEnhanced = { peer ->
+                                EnhancedSecureHub.reveal()
+                                EnhancedSecureHub.ensureStarted()
+                                EnhancedSecureHub.start(peer)
+                                enhanced = true
+                            },
                         )
                     } else Thread(model, openChat, chatSearchQuery)
                 }
@@ -633,29 +661,16 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
             ShareToAirdSheet(shared = sharedContent, model = model, onDismiss = { MainActivity.sharedContent.value = null })
         }
     }
-    val filesMotion = LocalAirdReducedMotion.current
-    AnimatedVisibility(
-        visible = files,
-        enter = if (filesMotion) fadeIn(tween(120)) else slideInHorizontally(tween(280)) { it } + fadeIn(tween(180)),
-        exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
-    ) {
+    AnimatedVisibility(visible = files, enter = airdEnter(), exit = airdExit()) {
         AirdFilesScreen(startPath = filePath, onBack = { files = false })
     }
-    AnimatedVisibility(
-        visible = lists,
-        enter = if (filesMotion) fadeIn(tween(120)) else slideInHorizontally(tween(280)) { it } + fadeIn(tween(180)),
-        exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
-    ) {
+    AnimatedVisibility(visible = lists, enter = airdEnter(), exit = airdExit()) {
         AirdListsScreen(onBack = { lists = false })
     }
-    AnimatedVisibility(
-        visible = polls,
-        enter = if (filesMotion) fadeIn(tween(120)) else slideInHorizontally(tween(280)) { it } + fadeIn(tween(180)),
-        exit = if (filesMotion) fadeOut(tween(90)) else slideOutHorizontally(tween(240)) { it } + fadeOut(tween(140)),
-    ) {
+    AnimatedVisibility(visible = polls, enter = airdEnter(), exit = airdExit()) {
         AirdPollsScreen(onBack = { polls = false })
     }
-    if (search) {
+    AnimatedVisibility(visible = search, enter = airdEnter(), exit = airdExit()) {
         AirdSuperSearchScreen(
             startPath = "",
             onBack = { search = false },
@@ -666,14 +681,23 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
             },
         )
     }
-    if (shared) SharedWithMeScreen(onBack = { shared = false })
+    AnimatedVisibility(visible = shared, enter = airdEnter(), exit = airdExit()) {
+        SharedWithMeScreen(onBack = { shared = false })
+    }
     if (keys) KeyBackupSheet(onDismiss = { keys = false })
-    if (enhanced) EnhancedSecureScreen(onBack = { enhanced = false })
+    AnimatedVisibility(visible = enhanced, enter = airdEnter(), exit = airdExit()) {
+        EnhancedSecureScreen(onBack = {
+            EnhancedSecureHub.leaveWindow()
+            enhanced = false
+        })
+    }
     if (settings) AppSettingsSheet(onDismiss = { settings = false })
     BackHandler(enabled = shared) { shared = false }
     BackHandler(enabled = keys) { keys = false }
-    BackHandler(enabled = enhanced) { enhanced = false }
-    BackHandler(enabled = settings) { settings = false }
+    BackHandler(enabled = enhanced) {
+        EnhancedSecureHub.leaveWindow()
+        enhanced = false
+    }
     lift?.let { drag ->
         val conversation = conversations.firstOrNull { it.id == drag.id }
         if (conversation != null) {
@@ -698,6 +722,7 @@ private fun HomeOverflowMenu(
     reduced: Boolean,
     onDismiss: () -> Unit,
     items: List<Pair<String, () -> Unit>>,
+    destructive: String? = null,
 ) {
     val state = remember { MutableTransitionState(false) }
     state.targetState = expanded
@@ -732,9 +757,15 @@ private fun HomeOverflowMenu(
                 shadowElevation = 12.dp,
                 tonalElevation = 3.dp,
             ) {
-                Column(Modifier.width(236.dp).padding(vertical = 6.dp)) {
+                Column(
+                    Modifier
+                        .width(236.dp)
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 6.dp),
+                ) {
                     items.forEach { (label, action) ->
-                        val parting = label == "Sign out"
+                        val parting = destructive != null && label == destructive
                         if (parting) HorizontalDivider(Modifier.padding(vertical = 4.dp))
                         Text(
                             label,
@@ -881,11 +912,19 @@ private fun ConversationList(
     selectedId: String = "",
     modifier: Modifier = Modifier.fillMaxSize(),
     onBubbleDrag: (String, Offset, BubblePhase) -> Unit = { _, _, _ -> },
+    secure: List<SecureSummary> = emptyList(),
+    onSecure: (String) -> Unit = {},
+    onEnhanced: (String) -> Unit = {},
 ) {
     val q = query.trim()
     val shown = filterConversations(items, q)
+    val secureShown = if (q.isEmpty()) {
+        secure
+    } else {
+        secure.filter { it.peer.contains(q, true) || it.preview.contains(q, true) }
+    }
     Column(modifier) {
-        if (shown.isEmpty()) {
+        if (shown.isEmpty() && secureShown.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     if (q.isEmpty()) "No conversations yet" else "No matches",
@@ -900,6 +939,30 @@ private fun ConversationList(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            items(secureShown, key = { "secure:${it.roomId}" }) { room ->
+                Surface(
+                    onClick = { onSecure(room.roomId) },
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp)) {
+                        Text(
+                            room.peer.ifBlank { "Enhanced Secure Chat" },
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            room.preview,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
             items(shown, key = { it.id }) { conversation ->
                 val unread = conversation.unread > 0
                 val isOnline = conversation.online
@@ -907,6 +970,10 @@ private fun ConversationList(
                 var rowOrigin by remember(conversation.id) { mutableStateOf(Offset.Zero) }
                 val drag by rememberUpdatedState(onBubbleDrag)
                 val origin by rememberUpdatedState(rowOrigin)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                 Surface(
                     onClick = { model.open(conversation.id) },
                     shape = RoundedCornerShape(16.dp),
@@ -916,7 +983,7 @@ private fun ConversationList(
                         else -> Color.Transparent
                     },
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .weight(1f)
                         .onGloballyPositioned { rowOrigin = it.positionInRoot() }
                         .pointerInput(conversation.id) {
                             val slop = viewConfiguration.touchSlop
@@ -1059,6 +1126,24 @@ private fun ConversationList(
                             }
                         }
                     }
+                }
+                if (conversation.kind == "dm" && conversation.peer.isNotBlank()) {
+                    var more by remember(conversation.id) { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { more = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Conversation actions")
+                        }
+                        DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Enhanced Secure Chat") },
+                                onClick = {
+                                    more = false
+                                    onEnhanced(conversation.peer)
+                                },
+                            )
+                        }
+                    }
+                }
                 }
             }
         }

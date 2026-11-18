@@ -4,6 +4,11 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val releaseKeystore = System.getenv("AIRD_KEYSTORE") ?: findProperty("AIRD_KEYSTORE")?.toString()
+val releaseStorePassword = System.getenv("AIRD_KEYSTORE_PASSWORD") ?: findProperty("AIRD_KEYSTORE_PASSWORD")?.toString()
+val releaseKeyAlias = System.getenv("AIRD_KEY_ALIAS") ?: findProperty("AIRD_KEY_ALIAS")?.toString()
+val releaseKeyPassword = System.getenv("AIRD_KEY_PASSWORD") ?: findProperty("AIRD_KEY_PASSWORD")?.toString()
+
 android {
     namespace = "com.aird"
     compileSdk = 36
@@ -12,16 +17,33 @@ android {
         applicationId = "com.aird"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.1"
+        versionCode = 2
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (!releaseKeystore.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            optimization {
-                enable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            if (signingConfigs.findByName("release") != null) {
+                signingConfig = signingConfigs.getByName("release")
             }
         }
     }

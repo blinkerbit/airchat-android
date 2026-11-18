@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
+    <exclude domain="root" path="app_webview" />
+    <exclude domain="root" path="app_webview_cache" />
+    <exclude domain="file" path="chat-files" />
     <exclude domain="file" path="chat-outbox.json" />
     <exclude domain="file" path="chat-outbox.json.part" />
+    <exclude domain="sharedpref" path="aird.xml" />
 </full-backup-content>

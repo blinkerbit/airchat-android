@@ -44,6 +44,7 @@ class AirdConnectionService : Service() {
             // Every (re)connect: catch up on anything sent while the link was down.
             AirdSocket.addOpenListener {
                 ChatRepository.resyncAsync(app)
+                com.aird.chat.data.CollabRepository.resyncOpen(app)
                 CallController.recover(app)
             }
             AirdSocket.addStateListener { instance?.refreshIdleNotification() }
@@ -170,22 +171,22 @@ class AirdConnectionService : Service() {
 
     private fun openCall(): PendingIntent = activityPending(
         3,
-        Intent(this, MainActivity::class.java).apply {
+        InternalLaunch.stamp(this, Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("action", "expand_call")
-        },
+        }),
     )
 
     private fun acceptCall(call: CallSnapshot): PendingIntent = activityPending(
         (call.conversationId + "accept").hashCode(),
-        Intent(this, MainActivity::class.java).apply {
+        InternalLaunch.stamp(this, Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("action", "accept_call")
             putExtra("conversation_id", call.conversationId)
             putExtra("call_id", call.callId)
             putExtra("call_mode", call.mode)
             putExtra("call_from", call.peer)
-        },
+        }),
     )
 
     private fun activityPending(requestCode: Int, intent: Intent): PendingIntent {
@@ -292,14 +293,14 @@ class AirdConnectionService : Service() {
             (call.conversationId + "decline").hashCode(),
             call,
         )
-        val openIntent = Intent(this, MainActivity::class.java).apply {
+        val openIntent = InternalLaunch.stamp(this, Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("action", "incoming_call")
             putExtra("conversation_id", call.conversationId)
             putExtra("call_id", call.callId)
             putExtra("call_mode", call.mode)
             putExtra("call_from", call.peer)
-        }
+        })
         val open = activityPending(("call-open:" + call.conversationId).hashCode(), openIntent)
         val video = call.mode == "video"
         val caller = call.peer.ifEmpty { "Incoming call" }

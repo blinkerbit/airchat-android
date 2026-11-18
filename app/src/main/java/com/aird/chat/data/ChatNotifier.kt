@@ -20,6 +20,7 @@ import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.aird.AirdConnectionService
 import com.aird.ChatBubbleActivity
+import com.aird.InternalLaunch
 import com.aird.MainActivity
 import com.aird.chat.model.Conversation
 import com.aird.MarkAsReadReceiver
@@ -299,12 +300,12 @@ object ChatNotifier {
             mediaUri(app, note)?.let { uri -> message.setData(note.mediaMime, uri) }
             style.addMessage(message)
         }
-        val open = Intent(app, MainActivity::class.java).apply {
+        val open = InternalLaunch.stamp(app, Intent(app, MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("action", "open_chat")
             putExtra("conversation_id", conversationId)
-        }
+        })
         val content = PendingIntent.getActivity(
             app,
             conversationId.hashCode(),

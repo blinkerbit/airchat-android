@@ -21,6 +21,7 @@ import com.aird.chat.model.Reaction
 import com.aird.chat.model.ReadReceipt
 import com.aird.chat.model.nowIso
 import com.aird.chat.model.previewText
+import com.aird.core.transfer.RangeUpload
 import com.aird.session.AirdHttp
 import com.aird.session.AirdResponse
 import com.aird.session.AirdSocket
@@ -30,7 +31,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -91,6 +97,7 @@ object ChatRepository {
     private var typingClear: kotlinx.coroutines.Job? = null
     @Volatile private var appContext: Context? = null
     private val flushLock = Mutex()
+    private val decryptRetry = Mutex()
     private val sendLocks = ConcurrentHashMap<String, Mutex>()
     private val networkGate = Any()
     @Volatile private var networkRegistered = false
@@ -713,6 +720,21 @@ object ChatRepository {
         return deliverText(context, convId, body, replyToId, optimistic = true)
     }
 
+    suspend fun retryDecrypt(context: Context, message: ChatMessage) {
+        if (!message.e2e || message.decryptOk) return
+        val convId = message.conversationId.ifBlank { _activeId.value }
+        if (convId.isEmpty() || !decryptRetry.tryLock()) return
+        try {
+            val user = Session.username.value.ifBlank { ChatE2E.currentUsername() }
+            if (user.isNotBlank()) ChatE2E.prepare(context, user)
+            ChatE2E.clearKey(convId)
+            AirdSocket.send(JSONObject().put("type", "chat_e2e_need_key").put("conversation_id", convId).toString())
+            if (convId == _activeId.value) refreshOpen(context, convId, mark = false)
+        } finally {
+            decryptRetry.unlock()
+        }
+    }
+
     suspend fun retry(context: Context, message: ChatMessage): Boolean {
         if (!message.failed || message.id.isEmpty()) return false
         return withLocalSend(message.id) {
@@ -1198,45 +1220,61 @@ object ChatRepository {
         val body = session.json()
         val uploadId = body.optString("upload_id")
         if (uploadId.isEmpty()) return FileOp(false, "Could not upload")
-        val chunk = body.optLong("chunk_bytes", 4L * 1024 * 1024).coerceIn(256L * 1024, 8L * 1024 * 1024)
+        val chunk = body.optLong("chunk_bytes", RangeUpload.CHUNK_BYTES).coerceIn(256L * 1024, RangeUpload.CHUNK_BYTES)
         val done = coveredRanges(context, uploadId)
-        var sent = coveredBytes(done, size)
-        onProgress(sent, size)
-        var offset = 0L
-        while (offset < size) {
-            if (cancelled()) {
+        val sent = java.util.concurrent.atomic.AtomicLong(coveredBytes(done, size))
+        onProgress(sent.get(), size)
+        val pending = RangeUpload.chunks(size, chunk).filter { slice ->
+            !rangeCovered(done, slice.start, slice.endInclusive)
+        }
+        if (cancelled()) return FileOp(false, "cancelled")
+        val failure = java.util.concurrent.atomic.AtomicReference<FileOp?>(null)
+        val gate = Semaphore(RangeUpload.parallelism(chunk))
+        coroutineScope {
+            pending.map { slice ->
+                async {
+                    if (failure.get() != null || cancelled()) return@async
+                    gate.withPermit {
+                        if (failure.get() != null || cancelled()) return@withPermit
+                        val bytes = readSlice(context, uri, slice.start, slice.length.toInt())
+                        if (bytes.size.toLong() != slice.length) {
+                            failure.compareAndSet(null, FileOp(false, "Could not read the file"))
+                            return@withPermit
+                        }
+                        val response = try {
+                            AirdHttp.putBytes(
+                                context,
+                                "/api/upload/range/${URLEncoder.encode(uploadId, "UTF-8")}",
+                                bytes,
+                                mapOf("Content-Range" to slice.contentRange),
+                                cancelled,
+                            )
+                        } catch (err: Exception) {
+                            val message = if (cancelled() || err.message?.contains("cancelled") == true) "cancelled" else err.message ?: "Could not upload"
+                            failure.compareAndSet(null, FileOp(false, message))
+                            return@withPermit
+                        }
+                        if (response.code == 0 || cancelled()) {
+                            failure.compareAndSet(null, FileOp(false, "cancelled"))
+                            return@withPermit
+                        }
+                        if (!response.ok) {
+                            failure.compareAndSet(null, FileOp(false, fileMessage(response, "Could not upload")))
+                            return@withPermit
+                        }
+                        onProgress(sent.addAndGet(bytes.size.toLong()), size)
+                    }
+                }
+            }.awaitAll()
+        }
+        failure.get()?.let { failed ->
+            if (failed.message == "cancelled") {
                 try {
                     AirdHttp.send(context, "/api/upload/range/${URLEncoder.encode(uploadId, "UTF-8")}", "DELETE", JSONObject())
                 } catch (_: Exception) {
                 }
-                return FileOp(false, "cancelled")
             }
-            val len = minOf(chunk, size - offset).toInt()
-            val end = offset + len - 1
-            if (rangeCovered(done, offset, end)) {
-                offset += len
-                continue
-            }
-            val bytes = readSlice(context, uri, offset, len)
-            if (bytes.isEmpty()) return FileOp(false, "Could not read the file")
-            val response = try {
-                AirdHttp.putBytes(
-                    context,
-                    "/api/upload/range/${URLEncoder.encode(uploadId, "UTF-8")}",
-                    bytes,
-                    mapOf("Content-Range" to "bytes $offset-${offset + bytes.size - 1}/$size"),
-                    cancelled,
-                )
-            } catch (err: Exception) {
-                if (cancelled() || err.message?.contains("cancelled") == true) return FileOp(false, "cancelled")
-                return FileOp(false, err.message ?: "Could not upload")
-            }
-            if (response.code == 0 || cancelled()) return FileOp(false, "cancelled")
-            if (!response.ok) return FileOp(false, fileMessage(response, "Could not upload"))
-            offset += bytes.size
-            sent = offset
-            onProgress(sent, size)
-            if (response.json().optString("status") == "complete") return FileOp(true, "")
+            return failed
         }
         return FileOp(true, "")
     }
@@ -2156,13 +2194,24 @@ object ChatRepository {
         )
     }
 
+    private fun jsonObject(value: Any?): JSONObject? = when (value) {
+        is JSONObject -> value
+        is String -> if (value.isBlank()) null else try {
+            JSONObject(value)
+        } catch (_: Exception) {
+            null
+        }
+        else -> null
+    }
+
     private suspend fun toMessage(context: Context, item: JSONObject, me: String): ChatMessage {
-        val meta = item.optJSONObject("metadata")
-        val sealed = meta?.optJSONObject("e2e")
+        val meta = jsonObject(item.opt("metadata"))
+        val sealed = jsonObject(meta?.opt("e2e"))
         val e2e = sealed != null || item.optBoolean("e2e")
         val decrypted = if (sealed != null) ChatE2E.decrypt(context, item.optString("conversation_id"), sealed) else null
         val body = when {
-            sealed != null -> decrypted ?: "Encrypted message"
+            decrypted != null -> decrypted
+            e2e -> "Encrypted message"
             else -> plain(item.optString("body"))
         }
         val card = meta?.optJSONObject("card")
@@ -2186,7 +2235,7 @@ object ChatRepository {
             createdAt = item.optString("created_at"),
             mine = isMine,
             e2e = e2e,
-            decryptOk = sealed == null || decrypted != null,
+            decryptOk = !e2e || decrypted != null,
             replyToId = cleanReplyId(item.optString("reply_to_id")),
             mentions = strings(item.optJSONArray("mentions") ?: meta?.optJSONArray("mentions")),
             attachments = attachmentsOf(item),

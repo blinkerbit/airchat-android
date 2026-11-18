@@ -287,6 +287,20 @@ fun MessageRow(
     val haptic = LocalHapticFeedback.current
     val reduced = LocalAirdReducedMotion.current
     val scope = rememberCoroutineScope()
+    val locked = message.needsKey()
+    var unlocking by remember(message.id) { mutableStateOf(false) }
+    val unlock = {
+        if (locked && !unlocking) {
+            unlocking = true
+            scope.launch {
+                try {
+                    ChatRepository.retryDecrypt(context, message)
+                } finally {
+                    unlocking = false
+                }
+            }
+        }
+    }
     var dragX by remember(message.id) { mutableFloatStateOf(0f) }
     var settling by remember(message.id) { mutableStateOf(false) }
     var gesture by remember(message.id) { mutableIntStateOf(0) }
@@ -362,6 +376,7 @@ fun MessageRow(
                         messageId = message.id,
                         reduced = reduced,
                         failed = message.failed,
+                        locked = locked,
                         selecting = onSelect != null,
                         space = bubbleGestures,
                         onLongPress = {
@@ -380,6 +395,7 @@ fun MessageRow(
                             }
                         },
                         onRetry = onRetry,
+                        onUnlock = unlock,
                         onSelectTap = { onSelect?.invoke() },
                         onDrag = { dragX = it },
                         onRelease = { offset, trigger ->
@@ -409,6 +425,8 @@ fun MessageRow(
                             quoteText = quoteText,
                             mine = mine,
                             highlighted = highlighted,
+                            unlocking = unlocking,
+                            onUnlock = unlock,
                             onQuoteClick = onQuoteClick,
                             onOpen = { viewer = it },
                             onFile = { attachment ->
@@ -650,12 +668,12 @@ private fun Bubble(
     quoteText: String,
     mine: Boolean,
     highlighted: Boolean,
+    unlocking: Boolean,
+    onUnlock: () -> Unit,
     onQuoteClick: (String) -> Unit,
     onOpen: (ChatAttachment) -> Unit,
     onFile: (ChatAttachment) -> Unit,
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val fg = if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
     val defaultBg = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val targetBg = if (highlighted) MaterialTheme.colorScheme.tertiaryContainer else defaultBg
@@ -701,7 +719,7 @@ private fun Bubble(
         mentions.forEach { mention ->
             CollabInline(mention.kind, "", mention.slug, "", mine)
         }
-        if (message.e2e && !message.decryptOk) {
+        if (message.needsKey()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(vertical = 4.dp),
@@ -713,14 +731,8 @@ private fun Bubble(
                     fontSize = 14.sp,
                     modifier = Modifier.padding(start = 4.dp),
                 )
-                TextButton(
-                    onClick = {
-                        scope.launch {
-                            ChatE2E.prepare(context, Session.username.value)
-                        }
-                    },
-                ) {
-                    Text("Retry", color = fg)
+                TextButton(onClick = onUnlock, enabled = !unlocking) {
+                    Text(if (unlocking) "Retrying…" else "Retry", color = fg)
                 }
             }
         } else if (shownBody.isNotBlank() && shownBody != "Encrypted message") {
@@ -1390,11 +1402,13 @@ private fun Modifier.replySwipeGestures(
     messageId: String,
     reduced: Boolean,
     failed: Boolean,
+    locked: Boolean,
     selecting: Boolean,
     space: BubbleGestures,
     onLongPress: () -> Unit,
     onLongPressEnd: () -> Unit,
     onRetry: () -> Unit,
+    onUnlock: () -> Unit,
     onSelectTap: () -> Unit,
     onDrag: (Float) -> Unit,
     onRelease: (offset: Float, triggerReply: Boolean) -> Unit,
@@ -1402,7 +1416,7 @@ private fun Modifier.replySwipeGestures(
 ): Modifier = composed {
     val origin = remember { mutableStateOf(Offset.Zero) }
     onGloballyPositioned { origin.value = it.positionInRoot() }
-        .pointerInput(messageId, reduced, failed, selecting) {
+        .pointerInput(messageId, reduced, failed, locked, selecting) {
             val replyThreshold = 72.dp.toPx()
             val maxDrag = 180.dp.toPx()
             val touchSlop = viewConfiguration.touchSlop
@@ -1479,7 +1493,8 @@ private fun Modifier.replySwipeGestures(
                     }
                     MessagePress.SelectTap -> onSelectTap()
                     MessagePress.Up -> {
-                        if (failed && abs(offsetX) < touchSlop && abs(offsetY) < touchSlop) onRetry()
+                        if (abs(offsetX) >= touchSlop || abs(offsetY) >= touchSlop) return@awaitEachGesture
+                        if (locked) onUnlock() else if (failed) onRetry()
                     }
                     MessagePress.Scroll, MessagePress.Cancel -> Unit
                 }

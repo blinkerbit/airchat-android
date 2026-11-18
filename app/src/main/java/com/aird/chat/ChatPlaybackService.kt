@@ -17,6 +17,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionToken
 import com.aird.MainActivity
+import com.aird.security.HostPolicy
 import com.aird.session.AirdHttp
 
 class ChatPlaybackService : MediaSessionService() {
@@ -44,10 +45,26 @@ class ChatPlaybackService : MediaSessionService() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        mediaSession = MediaSession.Builder(this, player).setSessionActivity(open).build()
+        mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(open)
+            .setCallback(object : MediaSession.Callback {
+                override fun onConnect(
+                    session: MediaSession,
+                    controller: MediaSession.ControllerInfo,
+                ): MediaSession.ConnectionResult {
+                    if (controller.packageName == packageName || controller.isTrusted) {
+                        return MediaSession.ConnectionResult.AcceptedResultBuilder(session).build()
+                    }
+                    return MediaSession.ConnectionResult.reject()
+                }
+            })
+            .build()
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
+        if (controllerInfo.packageName != packageName && !controllerInfo.isTrusted) return null
+        return mediaSession
+    }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         if (player?.isPlaying != true) stopSelf()
@@ -115,14 +132,16 @@ object ChatPlayback {
 
     private fun resolve(context: Context, url: String): String {
         val trimmed = url.trim()
-        if (trimmed.isEmpty()) return ""
-        if (trimmed.startsWith("http://", true) ||
-            trimmed.startsWith("https://", true) ||
-            trimmed.startsWith("file:", true) ||
-            trimmed.startsWith("content:", true)
-        ) {
-            return trimmed
+        val otherScheme = trimmed.contains("://") &&
+            !trimmed.startsWith("http://", true) &&
+            !trimmed.startsWith("https://", true)
+        if (trimmed.isEmpty() || otherScheme) return ""
+        val absolute = if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
+            trimmed
+        } else {
+            AirdHttp.absolute(context, trimmed)
         }
-        return AirdHttp.absolute(context, trimmed)
+        if (!HostPolicy.isSafeRemoteUrl(absolute)) return ""
+        return absolute
     }
 }

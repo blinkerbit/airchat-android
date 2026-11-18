@@ -12,11 +12,11 @@ class ListReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val title = intent.getStringExtra("title").orEmpty().ifBlank { "List" }
         val text = intent.getStringExtra("text").orEmpty().ifBlank { "An item is due" }
-        val open = Intent(context, MainActivity::class.java).apply {
+        val open = InternalLaunch.stamp(context, Intent(context, MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("action", "open_lists")
-        }
+        })
         val content = PendingIntent.getActivity(
             context,
             text.hashCode(),

@@ -1,7 +1,7 @@
 package com.aird
 
 import android.content.Context
-import android.net.Uri
+import com.aird.security.HostPolicy
 
 object ServerStore {
     private const val PREFS = "aird"
@@ -28,9 +28,5 @@ object ServerStore {
         return withScheme.trimEnd('/')
     }
 
-    fun isValid(raw: String): Boolean {
-        val uri = Uri.parse(normalize(raw))
-        val scheme = uri.scheme
-        return (scheme == "https" || scheme == "http") && !uri.host.isNullOrBlank()
-    }
+    fun isValid(raw: String): Boolean = HostPolicy.isSafeRemoteUrl(normalize(raw))
 }

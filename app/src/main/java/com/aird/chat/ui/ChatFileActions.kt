@@ -247,7 +247,14 @@ suspend fun shareChatAttachments(context: Context, messageId: String, attachment
 fun openAirdShareInBrowser(context: Context, shareUrl: String) {
     val path = shareUrl.trim()
     if (path.isEmpty()) return
-    val absolute = if (path.startsWith("http")) path else ServerStore.get(context) + path
+    val absolute = if (path.startsWith("http://", true) || path.startsWith("https://", true)) {
+        path
+    } else if (path.contains("://")) {
+        return
+    } else {
+        ServerStore.get(context) + path
+    }
+    if (!com.aird.security.HostPolicy.isSafeRemoteUrl(absolute)) return
     openHttpUrl(context, absolute)
 }
 
@@ -291,7 +298,6 @@ private suspend fun ensureAppFile(context: Context, messageId: String, attachmen
             part.delete()
             if (dest.exists() && dest.length() == 0L) dest.delete()
             if (copyCachedImage(app, attachment.url, dest)) return@singleFlight dest
-            e.printStackTrace()
             toast(app, "Download failed: ${e.localizedMessage}")
             null
         } finally {
@@ -341,15 +347,16 @@ private fun looksLikeErrorBody(file: File): Boolean {
 }
 
 private fun exportToDownloads(context: Context, file: File, displayName: String, mime: String): Boolean {
+    val safeName = safeChatFileName(displayName)
     return try {
-        writePublicDownload(context, file, displayName, mime)
+        writePublicDownload(context, file, safeName, mime)
         true
     } catch (_: Exception) {
         try {
             @Suppress("DEPRECATION")
             val fallbackDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             fallbackDir.mkdirs()
-            file.copyTo(File(fallbackDir, displayName), overwrite = true)
+            file.copyTo(File(fallbackDir, safeName), overwrite = true)
             true
         } catch (_: Exception) {
             false

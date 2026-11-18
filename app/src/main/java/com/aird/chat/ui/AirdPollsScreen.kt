@@ -1,6 +1,7 @@
 package com.aird.chat.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import com.aird.chat.data.CollabRepository
+import com.aird.ui.airdPush
 import com.aird.chat.model.PollArtifact
 import com.aird.chat.model.PollDraft
 import com.aird.chat.model.PollSummary
@@ -62,6 +64,7 @@ fun AirdPollsScreen(onBack: () -> Unit) {
     var creating by remember { mutableStateOf(false) }
     var share by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf(setOf<String>()) }
+    val reduced = com.aird.ui.LocalAirdReducedMotion.current
 
     fun reload() {
         scope.launch {
@@ -119,10 +122,16 @@ fun AirdPollsScreen(onBack: () -> Unit) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
             if (error.isNotEmpty()) Text(error, fontSize = 13.sp)
-            if (openId.isBlank()) {
-                LazyColumn(Modifier.weight(1f)) {
+            AnimatedContent(
+                targetState = openId.isBlank(),
+                modifier = Modifier.weight(1f),
+                transitionSpec = { airdPush(forward = !targetState, reduced = reduced) },
+                label = "polls",
+            ) { index ->
+            if (index) {
+                LazyColumn(Modifier.fillMaxSize()) {
                     items(polls, key = { it.id }) { poll ->
-                        Column(Modifier.fillMaxWidth().clickable { openId = poll.id }.padding(vertical = 10.dp)) {
+                        Column(Modifier.animateItem().fillMaxWidth().clickable { openId = poll.id }.padding(vertical = 10.dp)) {
                             Text(poll.question, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(
                                 "${poll.votes} votes${if (poll.active) "" else " · Closed"}",
@@ -172,6 +181,7 @@ fun AirdPollsScreen(onBack: () -> Unit) {
                         }) { Text("Save vote") }
                     }
                 }
+            }
             }
         }
     }

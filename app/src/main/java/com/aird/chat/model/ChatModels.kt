@@ -98,6 +98,8 @@ data class ChatMessage(
     val cardId: String = "",
     val cardTitle: String = "",
 ) {
+    fun needsKey(): Boolean = e2e && !decryptOk
+
     fun clock(): String = formatMessageTime(createdAt)
 
     fun replyTargetId(): String {

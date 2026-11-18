@@ -87,6 +87,18 @@ object ChatCrypto {
 
     fun randomKey(): ByteArray = ByteArray(32).also { random.nextBytes(it) }
 
+    fun encodeKey(raw: ByteArray): String = b64(raw)
+
+    fun decodeKey(value: String): ByteArray? {
+        if (value.isBlank()) return null
+        return try {
+            val raw = unb64(value)
+            if (raw.size == 32) raw else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun encrypt(rawKey: ByteArray, convId: String, plaintext: String): Sealed {
         val iv = ByteArray(12).also { random.nextBytes(it) }
         val ct = aesEncrypt(rawKey, iv, plaintext.toByteArray(Charsets.UTF_8), convId.toByteArray(Charsets.UTF_8))

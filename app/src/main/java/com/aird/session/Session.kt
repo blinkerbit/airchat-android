@@ -52,6 +52,7 @@ object Session {
         com.aird.AppLock.onSignedOut()
         ChatRepository.clear()
         ChatE2E.clear()
+        PasskeyDevice.resetSession()
         AirdSocket.stop()
         AirdConnectionService.stop(context)
         _signedIn.value = false

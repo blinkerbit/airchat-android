@@ -9,8 +9,10 @@ import android.webkit.CookieManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.aird.security.HostPolicy
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -80,7 +82,7 @@ fun LoginScreen(onSignedIn: () -> Unit) {
         TextButton(
             onClick = {
                 if (!ServerStore.isValid(server)) {
-                    error = "Enter a full http or https address."
+                    error = "Use https, or http on your local network."
                     serverOpen = true
                     return@TextButton
                 }
@@ -97,7 +99,7 @@ fun LoginScreen(onSignedIn: () -> Unit) {
             onDismiss = { serverOpen = false },
             onSave = {
                 if (!ServerStore.isValid(server)) {
-                    error = "Enter a full http or https address."
+                    error = "Use https, or http on your local network."
                     return@ServerDialog
                 }
                 ServerStore.set(context, server)
@@ -146,10 +148,26 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit, onFail: (S
                     settings.builtInZoomControls = false
                     settings.displayZoomControls = false
                     settings.textZoom = 100
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    @Suppress("DEPRECATION")
+                    settings.allowFileAccessFromFileURLs = false
+                    @Suppress("DEPRECATION")
+                    settings.allowUniversalAccessFromFileURLs = false
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    settings.setGeolocationEnabled(false)
                     setInitialScale(0)
                     CookieManager.getInstance().setAcceptCookie(true)
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
                     webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                            val target = request.url ?: return true
+                            val scheme = target.scheme?.lowercase().orEmpty()
+                            if (scheme != "http" && scheme != "https") return true
+                            if (scheme == "http" && !HostPolicy.allowsCleartext(target.host.orEmpty())) return true
+                            return false
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
                             view?.evaluateJavascript(LOGIN_FIT, null)
                             if (view == null || url.isNullOrEmpty()) return
@@ -194,13 +212,15 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit, onFail: (S
                             }
                         }
                     }
-                    loadUrl(ServerStore.get(viewContext))
+                    val start = ServerStore.get(viewContext)
+                    if (HostPolicy.isSafeRemoteUrl(start)) loadUrl(start) else onFail("Use https, or http on your local network.")
                 }
             },
             update = { view ->
                 if (view.tag != page) {
                     view.tag = page
-                    if (page > 0) view.loadUrl(ServerStore.get(view.context))
+                    val next = ServerStore.get(view.context)
+                    if (page > 0 && HostPolicy.isSafeRemoteUrl(next)) view.loadUrl(next)
                 }
             },
         )
@@ -226,7 +246,7 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit, onFail: (S
             onDismiss = { serverOpen = false },
             onSave = {
                 if (!ServerStore.isValid(server)) {
-                    error = "Enter a full http or https address."
+                    error = "Use https, or http on your local network."
                     return@ServerDialog
                 }
                 ServerStore.set(context, server)

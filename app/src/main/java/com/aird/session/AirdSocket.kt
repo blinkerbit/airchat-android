@@ -13,6 +13,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.webkit.CookieManager
 import com.aird.ServerStore
+import com.aird.security.HostPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -126,6 +127,10 @@ object AirdSocket {
         handler.removeCallbacks(reconnect)
         CookieManager.getInstance().flush()
         val server = ServerStore.get(context)
+        if (!HostPolicy.isSafeRemoteUrl(server)) {
+            setFailed(true)
+            return
+        }
         val available = if (screenAvailable(context)) "1" else "0"
         val ws = server.replace("https://", "wss://").replace("http://", "ws://") +
             "/ws/chat?available=$available"

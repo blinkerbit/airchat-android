@@ -1,5 +1,7 @@
 package com.aird.chat.ui
 
+import android.content.Context
+import android.os.PowerManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -46,6 +49,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.aird.AppForeground
 import com.aird.chat.crypto.ChatCrypto
 import com.aird.session.AirdSocket
@@ -155,14 +161,21 @@ private object EnhancedCrypto {
     }
 }
 
-private data class SecureLine(val id: String, val text: String, val mine: Boolean, val status: String)
+internal data class SecureLine(val id: String, val text: String, val mine: Boolean, val status: String)
 
-private data class SecureView(
+internal data class SecureView(
     val roomId: String,
     val peer: String,
     val requested: Boolean,
     val open: Boolean,
     val messages: List<SecureLine>,
+)
+
+data class SecureSummary(
+    val roomId: String,
+    val peer: String,
+    val preview: String,
+    val requested: Boolean,
 )
 
 private class SecretRoom(
@@ -172,26 +185,141 @@ private class SecretRoom(
     var aes: ByteArray? = null,
     var requested: Boolean = false,
     var open: Boolean = false,
+    var preserve: Boolean = false,
     val messages: MutableList<SecureLine> = mutableListOf(),
 )
 
-private object EnhancedSecureHub {
+internal object EnhancedSecureHub {
     private val started = AtomicBoolean(false)
     private val rooms = LinkedHashMap<String, SecretRoom>()
     private var draft: Pair<String, ChatCrypto.Identity>? = null
     private var viewing: String? = null
+    private var armPreserve = false
+    private var dropRooms = 0
+    private var windowOpen = false
+    private val dead = LinkedHashSet<String>()
+    private var appContext: Context? = null
 
     private val _view = MutableStateFlow<SecureView?>(null)
     val view: StateFlow<SecureView?> = _view
+    private val _summaries = MutableStateFlow<List<SecureSummary>>(emptyList())
+    val summaries: StateFlow<List<SecureSummary>> = _summaries
+    private val _preserve = MutableStateFlow(false)
+    val preserve: StateFlow<Boolean> = _preserve
+    private val _pendingPeer = MutableStateFlow("")
+    val pendingPeer: StateFlow<String> = _pendingPeer
+    private val _sealed = MutableStateFlow(false)
+    val sealed: StateFlow<Boolean> = _sealed
+    private val _closeWindow = MutableStateFlow(0)
+    val closeWindow: StateFlow<Int> = _closeWindow
     private val _notice = MutableStateFlow("")
     val notice: StateFlow<String> = _notice
     private val _noticeError = MutableStateFlow(false)
     val noticeError: StateFlow<Boolean> = _noticeError
 
+    fun attach(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    fun reveal() {
+        windowOpen = true
+        _sealed.value = false
+    }
+
     fun ensureStarted() {
         if (!started.compareAndSet(false, true)) return
         AirdSocket.addListener { raw -> onSocket(raw) }
         AirdSocket.addOpenListener { rejoin() }
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                onAppBackground()
+            }
+        })
+    }
+
+    fun setPreserve(on: Boolean) {
+        val room = viewing?.let { rooms[it] }
+        if (room != null) room.preserve = on else armPreserve = on
+        _preserve.value = on
+    }
+
+    fun show(roomId: String) {
+        if (rooms[roomId] == null) return
+        windowOpen = true
+        viewing = roomId
+        _pendingPeer.value = ""
+        _sealed.value = false
+        publish()
+    }
+
+    /** Back leaves this window. With the switch off, the session ends. */
+    fun leaveWindow() {
+        windowOpen = false
+        val room = viewing?.let { rooms[it] }
+        if (room != null) {
+            if (!room.preserve) {
+                end(room.roomId)
+                _sealed.value = true
+            }
+            return
+        }
+        if (!armPreserve && (draft != null || _pendingPeer.value.isNotEmpty())) {
+            dropInFlight()
+            note("")
+            _sealed.value = true
+        }
+    }
+
+    fun onDeviceLocked() {
+        windowOpen = false
+        if (draft != null || _pendingPeer.value.isNotEmpty()) dropInFlight()
+        val ids = rooms.keys.toList()
+        ids.forEach { end(it) }
+        draft = null
+        armPreserve = false
+        _pendingPeer.value = ""
+        _preserve.value = false
+        note("")
+        _sealed.value = true
+        _closeWindow.value = _closeWindow.value + 1
+    }
+
+    private fun onAppBackground() {
+        if (!screenInteractive()) return
+        val ids = rooms.filterValues { room ->
+            !room.preserve && !(room.requested && viewing != room.roomId)
+        }.keys.toList()
+        val pending = _pendingPeer.value.isNotEmpty() && !armPreserve
+        if (ids.isEmpty() && !pending) return
+        val close = (viewing != null && viewing in ids) || (pending && viewing == null)
+        ids.forEach { end(it) }
+        if (pending) {
+            dropInFlight()
+            note("")
+        }
+        if (close) {
+            windowOpen = false
+            _sealed.value = true
+            _closeWindow.value = _closeWindow.value + 1
+        }
+    }
+
+    private fun screenInteractive(): Boolean {
+        val ctx = appContext ?: return true
+        val power = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+        return power.isInteractive
+    }
+
+    private fun dropInFlight() {
+        dropRooms += 1
+        draft = null
+        _pendingPeer.value = ""
+    }
+
+    private fun bury(roomId: String) {
+        if (roomId.isEmpty()) return
+        dead.add(roomId)
+        while (dead.size > 32) dead.remove(dead.first())
     }
 
     fun start(peer: String) {
@@ -202,6 +330,8 @@ private object EnhancedSecureHub {
         }
         val existing = rooms.values.find { it.peer == name }
         if (existing != null) {
+            _pendingPeer.value = ""
+            _sealed.value = false
             if (existing.requested) {
                 viewing = existing.roomId
                 publish()
@@ -217,6 +347,8 @@ private object EnhancedSecureHub {
         }
         val keys = EnhancedCrypto.generateKeyPair()
         draft = name to keys
+        _pendingPeer.value = name
+        _sealed.value = false
         val sent = AirdSocket.send(
             JSONObject()
                 .put("type", "enhanced_invite")
@@ -226,6 +358,7 @@ private object EnhancedSecureHub {
         )
         if (!sent) {
             draft = null
+            _pendingPeer.value = ""
             fail("Chat connection is not open")
             return
         }
@@ -310,7 +443,12 @@ private object EnhancedSecureHub {
                 "enhanced_receipt" -> onReceipt(msg)
                 "enhanced_ended" -> wipe(msg.optString("room_id"))
                 "enhanced_error" -> {
+                    if (dropRooms > 0) {
+                        dropRooms -= 1
+                        return
+                    }
                     draft = null
+                    _pendingPeer.value = ""
                     fail(msg.optString("message").ifBlank { "Enhanced Secure Chat failed" })
                 }
             }
@@ -322,21 +460,30 @@ private object EnhancedSecureHub {
     private fun onRequest(msg: JSONObject) {
         val roomId = msg.optString("room_id")
         val from = msg.optString("from")
-        if (roomId.isEmpty() || from.isEmpty()) return
+        if (roomId.isEmpty() || from.isEmpty() || roomId in dead) return
         val room = rooms.getOrPut(roomId) {
             SecretRoom(roomId, from, identity = null, requested = true)
         }
         room.peer = from
         room.requested = true
         room.open = false
-        val current = viewing?.let { rooms[it] }
-        if (current == null || current.requested || !current.open) viewing = roomId
+        if (windowOpen) {
+            val current = viewing?.let { rooms[it] }
+            if (current == null || current.requested || !current.open) viewing = roomId
+        }
         note("$from requested an Enhanced Secure Chat")
         publish()
     }
 
     private fun onRoom(msg: JSONObject) {
-        val room = ensure(msg.optString("room_id"), msg.optString("peer")) ?: return
+        val dropping = dropRooms > 0
+        val room = ensure(msg.optString("room_id"), msg.optString("peer"), takeDraft = !dropping) ?: return
+        if (dropping) {
+            dropRooms -= 1
+            end(room.roomId)
+            return
+        }
+        _pendingPeer.value = ""
         room.open = false
         room.requested = false
         viewing = room.roomId
@@ -369,7 +516,9 @@ private object EnhancedSecureHub {
     }
 
     private fun onMsg(msg: JSONObject) {
-        val room = rooms[msg.optString("room_id")]
+        val roomId = msg.optString("room_id")
+        if (roomId in dead) return
+        val room = rooms[roomId]
         val key = room?.aes
         val messageId = msg.optString("message_id")
         if (room == null || key == null || messageId.isEmpty()) {
@@ -411,20 +560,27 @@ private object EnhancedSecureHub {
         }
     }
 
-    private fun ensure(roomId: String, peer: String): SecretRoom? {
-        if (roomId.isEmpty()) return null
+    private fun ensure(roomId: String, peer: String, takeDraft: Boolean = true): SecretRoom? {
+        if (roomId.isEmpty() || roomId in dead) return null
         rooms[roomId]?.let { room ->
             if (peer.isNotEmpty()) room.peer = peer
             return room
         }
-        val pending = draft
+        val pending = if (takeDraft) draft else null
         val keys = if (pending != null && (peer.isEmpty() || pending.first == peer)) {
             draft = null
             pending.second
         } else {
             null
         }
-        val room = SecretRoom(roomId, peer.ifBlank { pending?.first.orEmpty() }, keys)
+        val kept = if (keys != null) armPreserve else false
+        if (keys != null) armPreserve = false
+        val room = SecretRoom(
+            roomId,
+            peer.ifBlank { pending?.first.orEmpty() },
+            keys,
+            preserve = kept,
+        )
         rooms[roomId] = room
         return room
     }
@@ -442,13 +598,16 @@ private object EnhancedSecureHub {
 
     private fun wipe(roomId: String) {
         val room = rooms.remove(roomId) ?: return
+        bury(roomId)
         room.aes?.fill(0)
         room.aes = null
+        room.identity = null
+        room.messages.clear()
         if (viewing == roomId) {
             val next = rooms.values.firstOrNull { it.requested }
             viewing = next?.roomId
             if (next != null) note("${next.peer} requested an Enhanced Secure Chat")
-            else note("Enhanced Secure Chat ended")
+            else note("")
         }
         publish()
     }
@@ -473,6 +632,19 @@ private object EnhancedSecureHub {
                 requested = it.requested,
                 open = it.open,
                 messages = it.messages.toList(),
+            )
+        }
+        _preserve.value = room?.preserve ?: armPreserve
+        _summaries.value = rooms.values.map { item ->
+            SecureSummary(
+                roomId = item.roomId,
+                peer = item.peer,
+                requested = item.requested,
+                preview = when {
+                    item.requested -> "Enhanced Secure Chat request"
+                    item.open -> "Enhanced Secure Chat"
+                    else -> "Waiting for acceptance"
+                },
             )
         }
     }
@@ -518,6 +690,8 @@ fun EnhancedSecureScreen(onBack: () -> Unit) {
     val room by EnhancedSecureHub.view.collectAsState()
     val notice by EnhancedSecureHub.notice.collectAsState()
     val noticeError by EnhancedSecureHub.noticeError.collectAsState()
+    val pendingPeer by EnhancedSecureHub.pendingPeer.collectAsState()
+    val sealed by EnhancedSecureHub.sealed.collectAsState()
     var peer by remember { mutableStateOf("") }
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -525,6 +699,11 @@ fun EnhancedSecureScreen(onBack: () -> Unit) {
     LaunchedEffect(room?.messages?.size) {
         val count = room?.messages?.size ?: return@LaunchedEffect
         if (count > 0) listState.animateScrollToItem(count - 1)
+    }
+
+    if (sealed) {
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+        return
     }
 
     Scaffold(
@@ -577,6 +756,7 @@ fun EnhancedSecureScreen(onBack: () -> Unit) {
                     fontSize = 13.sp,
                 )
             }
+            PreserveSwitch()
             if (notice.isNotEmpty()) {
                 Text(
                     notice,
@@ -587,7 +767,7 @@ fun EnhancedSecureScreen(onBack: () -> Unit) {
                 )
             }
             when {
-                room == null -> Column(
+                room == null && pendingPeer.isEmpty() -> Column(
                     Modifier.fillMaxWidth().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -604,6 +784,11 @@ fun EnhancedSecureScreen(onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Start") }
                 }
+                room == null -> Text(
+                    "Waiting for $pendingPeer to accept",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                )
                 room?.requested == true -> Column(
                     Modifier.fillMaxWidth().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -667,6 +852,28 @@ fun EnhancedSecureScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PreserveSwitch() {
+    val on by EnhancedSecureHub.preserve.collectAsState()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text("Preserve on switch", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Off by default. On lets you switch apps and other chats. Locking the phone ends this chat and removes it.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = on,
+            onCheckedChange = { EnhancedSecureHub.setPreserve(it) },
+        )
     }
 }
 

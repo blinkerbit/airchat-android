@@ -23,15 +23,20 @@ import com.aird.chat.model.stampStillOpen
 import com.aird.session.AirdHttp
 import com.aird.session.AirdResponse
 import com.aird.session.Session
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 class CollabException(message: String) : Exception(message)
@@ -60,6 +65,9 @@ object CollabRepository {
     val focus: StateFlow<CollabFocus?> = _focus
     private val slotLock = Any()
     private val shelfGen = AtomicInteger()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val due = ConcurrentHashMap.newKeySet<String>()
+    private var appContext: Context? = null
 
     fun open(kind: String, id: String = "", slug: String = "") {
         if (kind.isBlank() || (id.isBlank() && slug.isBlank())) return
@@ -148,22 +156,36 @@ object CollabRepository {
         val kind = data.optString("kind")
         val id = data.optString("id")
         if (kind.isBlank() || id.isBlank()) return
+        appContext = context.applicationContext
         _live.tryEmit(kind to id)
         val here = ChatRepository.activeId.value
         val convs = data.optJSONArray("conversation_ids")
-        var hereToo = false
+        var sharedHere = false
         if (convs != null) {
             for (i in 0 until convs.length()) {
-                if (convs.optString(i) == here) hereToo = true
+                if (convs.optString(i) == here) sharedHere = true
             }
         }
-        if (hereToo && here.isNotBlank()) loadShelf(context, here)
+        if (sharedHere && here.isNotBlank()) loadShelf(context, here)
         val matching = _slots.value.values.filter { slot ->
             val art = slot.artifact
             art != null && art.type == kind && art.id == id
         }
-        if (matching.isEmpty() || matching.any { it.busy }) return
+        if (matching.isEmpty()) return
+        if (matching.any { it.busy }) {
+            due.add("$kind:$id")
+            return
+        }
         refresh(context, kind, id, "")
+    }
+
+    fun resyncOpen(context: Context) {
+        scope.launch {
+            val app = context.applicationContext
+            val open = _slots.value.values.mapNotNull { it.artifact }.distinctBy { it.type to it.id }
+            open.forEach { artifact -> refresh(app, artifact.type, artifact.id, artifact.slug) }
+            _live.tryEmit("list" to "")
+        }
     }
 
     data class ListBoard(
@@ -461,7 +483,32 @@ object CollabRepository {
             .put("actor_id", actorId)
             .put("since_hlc", sinceHlc)
             .put("ops", ops)
-        act(list) { sendDetail(context, "POST", "/api/lists/${list.id}/sync", body, ::parseList) }
+        act(list) {
+            sendDetail(context, "POST", "/api/lists/${list.id}/sync", body) { json ->
+                parseList(json.optJSONObject("list") ?: json)
+            }
+        }
+    }
+
+    suspend fun moveDepths(context: Context, list: ListArtifact, updates: List<Pair<ListEntry, Int>>) {
+        if (updates.isEmpty()) return
+        val actor = Session.username.value.ifBlank { "android" }
+        val clock = com.aird.core.model.HybridClock()
+        val ops = org.json.JSONArray()
+        updates.forEach { (item, depth) ->
+            val payload = JSONObject().put("depth", depth)
+            if (item.orderKey.isNotBlank()) payload.put("order", item.orderKey)
+            ops.put(
+                JSONObject()
+                    .put("opId", java.util.UUID.randomUUID().toString())
+                    .put("action", "MOVE")
+                    .put("blockId", item.id)
+                    .put("actorId", actor)
+                    .put("hlcTimestamp", clock.tick())
+                    .put("payload", payload),
+            )
+        }
+        syncList(context, list, ops, actorId = actor)
     }
 
     suspend fun deleteItem(context: Context, list: ListArtifact, itemId: String) {
@@ -606,6 +653,11 @@ object CollabRepository {
         editSlots { map ->
             map[slotKey(artifact.type, artifact.id, "")] = slot
             if (artifact.slug.isNotBlank()) map[slotKey(artifact.type, "", artifact.slug)] = slot
+        }
+        val key = "${artifact.type}:${artifact.id}"
+        val ctx = appContext
+        if (ctx != null && due.remove(key)) {
+            scope.launch { refresh(ctx, artifact.type, artifact.id, "") }
         }
     }
 

@@ -9,14 +9,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -88,6 +85,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -108,11 +106,21 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aird.chat.data.AirdEntry
 import com.aird.chat.data.ChatRepository
+import com.aird.core.transfer.RangeUpload
+import com.aird.discovery.DiscoveryManager
+import com.aird.transfer.FileUploadWorker
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import kotlinx.coroutines.flow.first
 import com.aird.chat.data.FileOp
 import com.aird.chat.data.TagCatalog
 import com.aird.chat.model.Conversation
 import com.aird.chat.model.ChatAttachment
 import com.aird.ui.LocalAirdReducedMotion
+import com.aird.ui.airdPush
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -174,6 +182,19 @@ fun AirdFilesScreen(
     var shareWith by remember { mutableStateOf<List<AirdEntry>?>(null) }
     val chats by ChatRepository.conversations.collectAsState()
     val cancelledUploads = remember { java.util.concurrent.ConcurrentHashMap.newKeySet<Long>() }
+    val uploadJobs = remember { mutableMapOf<Long, java.util.UUID>() }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) DiscoveryManager.onResume(context)
+            if (event == Lifecycle.Event.ON_PAUSE) DiscoveryManager.onPause()
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            DiscoveryManager.onPause()
+        }
+    }
     val place: FilesPlace = tag?.let { FilesPlace.Tag(it) } ?: FilesPlace.Folder(folder)
     val managing = onPick == null && placing == null
 
@@ -241,6 +262,35 @@ fun AirdFilesScreen(
         uploads = uploads + UploadRow(id, relative, 0, size.coerceAtLeast(0), "")
         val parent = relative.substringBeforeLast('/', "")
         val dir = listOf(dest.trim().trim('/'), parent).filter { it.isNotEmpty() }.joinToString("/")
+        val safe = safeFileName(leaf)
+        if (size >= RangeUpload.SMALL_FILE_BYTES) {
+            try {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: SecurityException) {
+            }
+            val workId = FileUploadWorker.enqueue(context, uri, dir, safe, size)
+            uploadJobs[id] = workId
+            scope.launch {
+                WorkManager.getInstance(context).getWorkInfoByIdFlow(workId).first { info ->
+                    if (info == null) return@first false
+                    val loaded = info.progress.getLong("loaded", 0L)
+                    val total = info.progress.getLong("total", size)
+                    uploads = uploads.map { row ->
+                        if (row.id != id) {
+                            row
+                        } else when (info.state) {
+                            WorkInfo.State.SUCCEEDED -> row.copy(status = "done", loaded = total.coerceAtLeast(loaded))
+                            WorkInfo.State.FAILED -> row.copy(status = "Could not upload")
+                            WorkInfo.State.CANCELLED -> row.copy(status = "cancelled")
+                            else -> row.copy(loaded = loaded, total = if (total > 0) total else row.total)
+                        }
+                    }
+                    if (info.state == WorkInfo.State.SUCCEEDED) reload += 1
+                    info.state.isFinished
+                }
+            }
+            return
+        }
         scope.launch {
             val op = ChatRepository.uploadUri(
                 context,
@@ -494,8 +544,12 @@ fun AirdFilesScreen(
                             style = MaterialTheme.typography.bodySmall,
                         )
                         IconButton(onClick = {
-                            if (row.status.isEmpty()) cancelledUploads.add(row.id)
-                            else uploads = uploads.filterNot { it.id == row.id }
+                            if (row.status.isEmpty()) {
+                                cancelledUploads.add(row.id)
+                                uploadJobs[row.id]?.let { WorkManager.getInstance(context).cancelWorkById(it) }
+                            } else {
+                                uploads = uploads.filterNot { it.id == row.id }
+                            }
                         }) {
                             Icon(Icons.Default.Close, contentDescription = if (row.status.isEmpty()) "Cancel upload" else "Dismiss")
                         }
@@ -524,17 +578,7 @@ fun AirdFilesScreen(
             HorizontalDivider()
             AnimatedContent(
                 targetState = place,
-                transitionSpec = {
-                    val dir = if (forward) 1 else -1
-                    if (reduced) {
-                        fadeIn(tween(120)) togetherWith fadeOut(tween(80))
-                    } else {
-                        ContentTransform(
-                            slideInHorizontally(tween(260)) { it * dir } + fadeIn(tween(160)),
-                            slideOutHorizontally(tween(220)) { -it * dir } + fadeOut(tween(120)),
-                        )
-                    }
-                },
+                transitionSpec = { airdPush(forward, reduced) },
                 label = "files",
             ) { current ->
                 FileList(

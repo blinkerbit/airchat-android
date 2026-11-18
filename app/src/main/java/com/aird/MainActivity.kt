@@ -1,7 +1,9 @@
 package com.aird
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -47,6 +49,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,8 +65,11 @@ import com.aird.call.ui.CallBubble
 import com.aird.call.ui.CallScreen
 import com.aird.chat.data.ChatRepository
 import com.aird.chat.ui.ChatHome
+import com.aird.chat.ui.EnhancedSecureHub
+import com.aird.session.PasskeyDevice
 import com.aird.session.Session
 import com.aird.theme.AirdPalettes
+import com.aird.ui.PasskeyOffer
 import com.aird.theme.ThemeStore
 import com.aird.ui.LoginScreen
 import com.aird.ui.theme.AirdTheme
@@ -76,6 +82,8 @@ data class SharedContent(
 
 class MainActivity : ComponentActivity() {
     private var privilegeStep = 0
+    private var lockWipeGeneration = 0
+    private var removeKeyguardListener: (() -> Unit)? = null
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         getSharedPreferences("aird", MODE_PRIVATE).edit().putBoolean(KEY_NOTIFICATIONS_PROMPTED, true).apply()
         if (!granted) notificationDenied.value = true
@@ -85,7 +93,10 @@ class MainActivity : ComponentActivity() {
     }
     private val screenOff = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) AppLock.lockIfIdle()
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                AppLock.lockIfIdle()
+                scheduleEnhancedLockWipe()
+            }
         }
     }
     private val pipActions = object : BroadcastReceiver() {
@@ -117,6 +128,8 @@ class MainActivity : ComponentActivity() {
             IntentFilter(Intent.ACTION_SCREEN_OFF),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        EnhancedSecureHub.attach(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) watchKeyguard()
         AppForeground.install()
         ThemeStore.load(this)
         ContextCompat.registerReceiver(
@@ -147,6 +160,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        removeKeyguardListener?.invoke()
+        removeKeyguardListener = null
         unregisterReceiver(pipActions)
         unregisterReceiver(screenOff)
         CallProximity.set(this, false)
@@ -155,6 +170,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val km = getSystemService(KeyguardManager::class.java)
+        val stillLocked = km?.isKeyguardLocked == true || km?.isDeviceLocked == true
+        if (stillLocked) EnhancedSecureHub.onDeviceLocked() else lockWipeGeneration++
         setupLockscreenFlags()
         WindowFlags.apply(this, secureChat.value, CallController.snapshot.value, isInPictureInPictureMode)
         askPrivileges()
@@ -179,22 +197,57 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    private fun scheduleEnhancedLockWipe() {
+        val gen = ++lockWipeGeneration
+        fun check() {
+            if (gen != lockWipeGeneration || isDestroyed) return
+            if (deviceLockedNow()) {
+                EnhancedSecureHub.onDeviceLocked()
+                return
+            }
+            val power = getSystemService(PowerManager::class.java)
+            if (power?.isInteractive == false) {
+                window.decorView.postDelayed({ check() }, 500L)
+            }
+        }
+        window.decorView.post { check() }
+    }
+
+    private fun deviceLockedNow(): Boolean {
+        val km = getSystemService(KeyguardManager::class.java) ?: return false
+        if (km.isKeyguardLocked || km.isDeviceLocked) return true
+        val power = getSystemService(PowerManager::class.java)
+        val screenOff = power?.isInteractive == false
+        val callUp = CallController.snapshot.value.phase != CallPhase.Idle
+        return screenOff && !km.isDeviceSecure && !callUp
+    }
+
+    @SuppressLint("NewApi")
+    private fun watchKeyguard() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val km = getSystemService(KeyguardManager::class.java) ?: return
+        val listener = KeyguardManager.KeyguardLockedStateListener { locked ->
+            if (locked) EnhancedSecureHub.onDeviceLocked()
+        }
+        km.addKeyguardLockedStateListener(ContextCompat.getMainExecutor(this), listener)
+        removeKeyguardListener = { km.removeKeyguardLockedStateListener(listener) }
+    }
+
     fun setupLockscreenFlags() {
+        val phase = CallController.snapshot.value.phase
+        val overLock = phase == CallPhase.Incoming ||
+            phase == CallPhase.Live ||
+            phase == CallPhase.Outgoing ||
+            phase == CallPhase.Joining
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
+            setShowWhenLocked(overLock)
+            setTurnScreenOn(overLock)
         }
         @Suppress("DEPRECATION")
-        window.addFlags(
-            android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+        val overlay = android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
             android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-            android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
             android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-        )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
-            keyguardManager?.requestDismissKeyguard(this, null)
-        }
+        if (overLock) window.addFlags(overlay) else window.clearFlags(overlay)
     }
 
     override fun onUserLeaveHint() {
@@ -324,7 +377,7 @@ class MainActivity : ComponentActivity() {
             val id = link.lastPathSegment.orEmpty()
             if (id.isNotEmpty()) ChatRepository.requestOpen(id)
         }
-        when (intent?.getStringExtra("action")) {
+        if (InternalLaunch.trusted(this, intent)) when (intent.getStringExtra("action")) {
             "open_chat" -> ChatRepository.requestOpen(intent.getStringExtra("conversation_id").orEmpty())
             "open_lists" -> openLists.value = true
             "accept_call" -> {
@@ -400,6 +453,9 @@ private fun AppLockGate() {
 private fun AirdRoot() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val signedIn by Session.signedIn.collectAsState()
+    val username by Session.username.collectAsState()
+    var passkeyChecked by remember { mutableStateOf(false) }
+    var passkeyOffer by remember { mutableStateOf(false) }
     val themeId by ThemeStore.id.collectAsState()
     val call by CallController.snapshot.collectAsState()
     val pip by MainActivity.inPip.collectAsState()
@@ -421,6 +477,7 @@ private fun AirdRoot() {
     }
     LaunchedEffect(call.phase, call.mode, call.minimized) {
         val activity = context as? MainActivity ?: return@LaunchedEffect
+        activity.setupLockscreenFlags()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.isInPictureInPictureMode) {
             activity.updatePipParams()
         }
@@ -432,6 +489,16 @@ private fun AirdRoot() {
     LaunchedEffect(secureChat, call.phase, call.mode, call.speaker, call.output, pip) {
         val activity = context as? Activity ?: return@LaunchedEffect
         WindowFlags.apply(activity, secureChat, call, pip)
+    }
+    LaunchedEffect(signedIn, username) {
+        if (!signedIn) {
+            passkeyChecked = true
+            passkeyOffer = false
+            return@LaunchedEffect
+        }
+        if (username.isBlank()) return@LaunchedEffect
+        passkeyOffer = PasskeyDevice.shouldOffer(context, username)
+        passkeyChecked = true
     }
     LaunchedEffect(signedIn) {
         if (!signedIn) return@LaunchedEffect
@@ -445,7 +512,10 @@ private fun AirdRoot() {
             val reduced = LocalAirdReducedMotion.current
             val appear = if (reduced || call.phase == CallPhase.Incoming) EnterTransition.None else fadeIn(tween(220))
             Box(Modifier.fillMaxSize()) {
-                if (signedIn) ChatHome() else LoginScreen(onSignedIn = {})
+                if (!signedIn) LoginScreen(onSignedIn = {})
+                else if (!passkeyChecked) Box(Modifier.fillMaxSize())
+                else if (passkeyOffer && !locked) PasskeyOffer(username) { passkeyOffer = false }
+                else ChatHome()
                 if (locked && signedIn && call.phase == CallPhase.Idle && !pip) AppLockGate()
                 val outcome = call.phase == CallPhase.Idle && call.status.isNotEmpty()
                 val showCall = outcome || pip || (call.phase != CallPhase.Idle && !call.minimized)

@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.aird.AirdConnectionService
 import com.aird.AppForeground
+import com.aird.InternalLaunch
 import com.aird.MainActivity
 import com.aird.R
 import com.aird.session.AirdHttp
@@ -1194,14 +1195,14 @@ object CallController {
         if (current.phase != CallPhase.Incoming) return
         acquireRingWakeLock(context)
         try {
-            val callIntent = Intent(context, MainActivity::class.java).apply {
+            val callIntent = InternalLaunch.stamp(context, Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                 putExtra("action", "incoming_call")
                 putExtra("conversation_id", current.conversationId)
                 putExtra("call_id", current.callId)
                 putExtra("call_mode", current.mode)
                 putExtra("call_from", current.peer)
-            }
+            })
             com.aird.IncomingCallReceiver.openFromBackground(context, callIntent)
         } catch (_: Exception) {
         }
@@ -1260,11 +1261,11 @@ object CallController {
         val open = PendingIntent.getActivity(
             context,
             ("shade:$conversationId").hashCode(),
-            Intent(context, MainActivity::class.java).apply {
+            InternalLaunch.stamp(context, Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra("action", "open_chat")
                 putExtra("conversation_id", conversationId)
-            },
+            }),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(context, AirdConnectionService.CHANNEL_ID)

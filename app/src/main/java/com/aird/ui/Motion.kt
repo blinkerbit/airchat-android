@@ -5,10 +5,21 @@ import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.IconButton
@@ -26,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 val LocalAirdReducedMotion = compositionLocalOf { false }
@@ -107,4 +119,57 @@ fun enterRiseModifier(id: String, enter: Boolean): Modifier {
         alpha = progress
         translationY = (1f - progress) * rise
     }
+}
+
+private fun quick(ms: Int): FiniteAnimationSpec<Float> = tween(durationMillis = ms, easing = FastOutSlowInEasing)
+
+@Composable
+fun airdEnter(): EnterTransition = airdEnter(LocalAirdReducedMotion.current)
+
+fun airdEnter(reduced: Boolean): EnterTransition {
+    if (reduced) return fadeIn(quick(80))
+    return slideInHorizontally(tween(160, easing = FastOutSlowInEasing)) { it / 10 } + fadeIn(quick(140))
+}
+
+@Composable
+fun airdExit(): ExitTransition = airdExit(LocalAirdReducedMotion.current)
+
+fun airdExit(reduced: Boolean): ExitTransition {
+    if (reduced) return fadeOut(quick(60))
+    return slideOutHorizontally(tween(120, easing = FastOutSlowInEasing)) { it / 10 } + fadeOut(quick(100))
+}
+
+fun airdPush(forward: Boolean, reduced: Boolean = false): ContentTransform {
+    if (reduced) return fadeIn(quick(80)) togetherWith fadeOut(quick(60))
+    val dir = if (forward) 1 else -1
+    return (slideInHorizontally(tween(170, easing = FastOutSlowInEasing)) { it / 6 * dir } + fadeIn(quick(130))) togetherWith
+        (slideOutHorizontally(tween(130, easing = FastOutSlowInEasing)) { -it / 6 * dir } + fadeOut(quick(90)))
+}
+
+@Composable
+fun airdReveal(): EnterTransition = airdReveal(LocalAirdReducedMotion.current)
+
+fun airdReveal(reduced: Boolean): EnterTransition {
+    if (reduced) return fadeIn(quick(80))
+    return fadeIn(quick(120)) + expandVertically(tween(140, easing = FastOutSlowInEasing))
+}
+
+@Composable
+fun airdHide(): ExitTransition = airdHide(LocalAirdReducedMotion.current)
+
+fun airdHide(reduced: Boolean): ExitTransition {
+    if (reduced) return fadeOut(quick(60))
+    return fadeOut(quick(90)) + shrinkVertically(tween(110, easing = FastOutSlowInEasing))
+}
+
+@Composable
+fun airdInset(depth: Int): Dp {
+    val target = 16.dp * depth
+    if (LocalAirdReducedMotion.current) return target
+    val inset by androidx.compose.animation.core.animateDpAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+        label = "indent",
+    )
+    return inset
 }
