@@ -112,6 +112,9 @@ interface StarredDao {
     @Query("SELECT * FROM starred ORDER BY starredAt DESC")
     fun all(): Flow<List<StarredEntity>>
 
+    @Query("SELECT * FROM starred ORDER BY starredAt DESC")
+    suspend fun list(): List<StarredEntity>
+
     @Query("SELECT messageId FROM starred")
     fun ids(): Flow<List<String>>
 
@@ -124,6 +127,9 @@ interface StarredDao {
 
 @Dao
 interface ConversationPrefsDao {
+    @Query("SELECT * FROM conversation_prefs")
+    suspend fun all(): List<ConversationPrefsEntity>
+
     @Query("SELECT * FROM conversation_prefs WHERE conversationId = :conversationId")
     fun observe(conversationId: String): Flow<ConversationPrefsEntity?>
 

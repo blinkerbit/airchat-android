@@ -90,10 +90,10 @@ data class StarredEntity(
 @Entity(tableName = "conversation_prefs")
 data class ConversationPrefsEntity(
     @PrimaryKey val conversationId: String,
-    val wallpaper: String,
-    val wallpaperBlur: Float,
-    val wallpaperDim: Float,
-    val accent: Long?,
+    val pinnedAt: Long = 0,
+    val wallpaper: String = "",
+    val wallpaperDim: Float = 0f,
+    val accent: Long? = null,
 )
 
 @Entity(tableName = "recent_files")

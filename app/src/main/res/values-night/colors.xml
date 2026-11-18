@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="aird_background">#FF121318</color>
+    <color name="aird_primary">#FFC0C1FF</color>
+    <color name="aird_splash_icon">#FF1F1F27</color>
+    <color name="aird_widget_surface">#FF1F1F27</color>
+    <color name="aird_widget_on_surface">#FFE4E1EA</color>
+</resources>

@@ -19,6 +19,29 @@ object Session {
     private val _username = MutableStateFlow("")
     val username: StateFlow<String> = _username
 
+    private const val PREFS = "aird_session"
+
+    /**
+     * Signs in from the last confirmed session so the app opens instantly and works offline.
+     * [probe] confirms it with the server and signs out if the cookie is no longer valid.
+     */
+    fun restore(context: Context): Boolean {
+        if (_signedIn.value) return true
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val user = prefs.getString("user", null).orEmpty()
+        val server = prefs.getString("server", null).orEmpty()
+        if (user.isEmpty() || server != ServerStore.get(context)) return false
+        val cookie = try {
+            CookieManager.getInstance().getCookie(server)
+        } catch (_: Exception) {
+            null
+        }
+        if (cookie.isNullOrBlank()) return false
+        _username.value = user
+        _signedIn.value = true
+        return true
+    }
+
     suspend fun probe(context: Context): Boolean {
         val response = try {
             AirdHttp.get(context, "/api/chat/conversations")
@@ -34,17 +57,25 @@ object Session {
         if (list != null && list.length() > 0) {
             name = list.optJSONObject(0)?.optString("_me").orEmpty()
         }
-        if (name.isEmpty()) name = usernameFromChatPage(context)
+        if (name.isEmpty()) name = usernameFromChatPage(context) ?: return false
         if (name.isEmpty()) {
-            _signedIn.value = false
+            if (_signedIn.value) signOut(context) else _signedIn.value = false
             return false
+        }
+        if (_username.value.isNotEmpty() && !_username.value.equals(name, ignoreCase = false)) {
+            ChatRepository.clear()
         }
         _username.value = name
         _signedIn.value = true
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("user", name)
+            .putString("server", ServerStore.get(context))
+            .apply()
         return true
     }
 
     fun signOut(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
         CookieManager.getInstance().removeAllCookies(null)
         CookieManager.getInstance().flush()
         UnreadBadge.apply(context, 0)
@@ -59,12 +90,14 @@ object Session {
         _username.value = ""
     }
 
-    private suspend fun usernameFromChatPage(context: Context): String {
+    /** Null when the server could not be reached; empty when it answered without a user. */
+    private suspend fun usernameFromChatPage(context: Context): String? {
         val response = try {
             AirdHttp.get(context, "/chat")
         } catch (_: Exception) {
-            return ""
+            return null
         }
+        if (response.code == 0 || response.code >= 500) return null
         val match = Regex("""window\.__AIRD_CHAT_USER__\s*=\s*("(?:\\.|[^"])*")""").find(response.body) ?: return ""
         return try {
             JSONObject("{\"u\":${match.groupValues[1]}}").getString("u")

@@ -6,6 +6,7 @@
         <exclude domain="file" path="chat-files" />
         <exclude domain="file" path="chat-outbox.json" />
         <exclude domain="file" path="chat-outbox.json.part" />
+        <exclude domain="database" path="." />
         <exclude domain="sharedpref" path="aird.xml" />
     </cloud-backup>
     <device-transfer>
@@ -14,6 +15,7 @@
         <exclude domain="file" path="chat-files" />
         <exclude domain="file" path="chat-outbox.json" />
         <exclude domain="file" path="chat-outbox.json.part" />
+        <exclude domain="database" path="." />
         <exclude domain="sharedpref" path="aird.xml" />
     </device-transfer>
 </data-extraction-rules>

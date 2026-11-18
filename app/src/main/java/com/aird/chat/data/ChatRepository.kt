@@ -97,6 +97,18 @@ object ChatRepository {
     private val _pendingOpen = MutableStateFlow("")
     val pendingOpen: StateFlow<String> = _pendingOpen
 
+    /** True once the chat list came from the cache or the server. */
+    private val _loaded = MutableStateFlow(false)
+    val loaded: StateFlow<Boolean> = _loaded
+
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: StateFlow<Boolean> = _refreshing
+
+    /** Who is typing in each chat, for the chat list. */
+    private val _typingIn = MutableStateFlow<Map<String, String>>(emptyMap())
+    val typingIn: StateFlow<Map<String, String>> = _typingIn
+    private val typingClears = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val events = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
@@ -158,6 +170,8 @@ object ChatRepository {
         LocalStore.revive(me)
         OutboxStore.attach(context, me)
         DraftStore.attach(context, me)
+        com.aird.data.ChatPrefsStore.attach(context, me)
+        com.aird.data.StarredStore.attach(context, me)
         if (_conversations.value.isEmpty()) {
             val cached = try {
                 LocalStore.db(context, me)?.conversations()?.all().orEmpty().map { it.toModel() }
@@ -167,6 +181,7 @@ object ChatRepository {
             }
             if (cached.isNotEmpty() && _conversations.value.isEmpty()) {
                 _conversations.value = cached
+                _loaded.value = true
                 publishUnreadBadge()
             }
         }
@@ -217,6 +232,19 @@ object ChatRepository {
     private var refreshSince = 0L
     private var refreshWaiting = false
 
+    /** Pull-to-refresh: shows progress until the list and the open thread are current. */
+    suspend fun pullRefresh(context: Context) {
+        if (_refreshing.value) return
+        _refreshing.value = true
+        try {
+            AirdSocket.ensureConnected()
+            refresh(context)
+            flushOutbox(context)
+        } finally {
+            _refreshing.value = false
+        }
+    }
+
     suspend fun refresh(context: Context, quiet: Boolean = false, catchUp: Boolean = false) {
         rememberApp(context)
         val response = try {
@@ -239,6 +267,7 @@ object ChatRepository {
         if (catchUp) notifyMissed(context, items)
         ChatNotifier.remember(context, items.map { it.id to it.updatedAt })
         _conversations.value = items
+        _loaded.value = true
         val presenceMap = mutableMapOf<String, Boolean>()
         items.forEach { conv ->
             if (conv.peer.isNotEmpty()) {
@@ -790,6 +819,13 @@ object ChatRepository {
         _typing.value = ""
     }
 
+    /** Closes [conversationId] if it is still the open thread, then quietly refreshes the list. */
+    fun leave(context: Context, conversationId: String) {
+        if (conversationId.isEmpty() || _activeId.value != conversationId) return
+        close()
+        scheduleRefresh(context, 300)
+    }
+
     fun typing() {
         val convId = _activeId.value
         if (convId.isEmpty()) return
@@ -876,6 +912,10 @@ object ChatRepository {
         threadCache.clear()
         OutboxStore.reset()
         DraftStore.clear()
+        com.aird.data.ChatPrefsStore.clear()
+        com.aird.data.StarredStore.clear()
+        _loaded.value = false
+        _typingIn.value = emptyMap()
         LocalStore.retire(user)
         appContext?.let { ctx -> scope.launch { ChatThreadStore.deleteUser(ctx, user) } }
         _conversations.value = emptyList()
@@ -1246,6 +1286,7 @@ object ChatRepository {
                 val convId = message.optString("conversation_id")
                 scope.launch {
                     val item = toMessage(context, message, Session.username.value)
+                    if (!item.mine && _typingIn.value.containsKey(convId)) _typingIn.value = _typingIn.value - convId
                     if (convId == _activeId.value) {
                         updateMessages { current ->
                             val withoutPending = if (item.mine) {
@@ -1346,6 +1387,14 @@ object ChatRepository {
             "chat_typing" -> {
                 val convId = data.optString("conversation_id")
                 val username = data.optString("username")
+                if (convId.isNotEmpty() && username.isNotEmpty() && !username.equals(Session.username.value, true)) {
+                    _typingIn.value = _typingIn.value + (convId to username)
+                    typingClears.remove(convId)?.cancel()
+                    typingClears[convId] = scope.launch {
+                        delay(3_000)
+                        _typingIn.value = _typingIn.value - convId
+                    }
+                }
                 if (convId != _activeId.value || username.equals(Session.username.value, true)) return
                 _typing.value = username
                 typingClear?.cancel()

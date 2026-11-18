@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "150d48d40ad2c4e262c3e22eeb50a589",
+    "identityHash": "ecb031c977cc401dfa30961e728fc786",
     "entities": [
       {
         "tableName": "messages",
@@ -428,7 +428,7 @@
       },
       {
         "tableName": "conversation_prefs",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`conversationId` TEXT NOT NULL, `wallpaper` TEXT NOT NULL, `wallpaperBlur` REAL NOT NULL, `wallpaperDim` REAL NOT NULL, `accent` INTEGER, PRIMARY KEY(`conversationId`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`conversationId` TEXT NOT NULL, `pinnedAt` INTEGER NOT NULL, `wallpaper` TEXT NOT NULL, `wallpaperDim` REAL NOT NULL, `accent` INTEGER, PRIMARY KEY(`conversationId`))",
         "fields": [
           {
             "fieldPath": "conversationId",
@@ -437,15 +437,15 @@
             "notNull": true
           },
           {
-            "fieldPath": "wallpaper",
-            "columnName": "wallpaper",
-            "affinity": "TEXT",
+            "fieldPath": "pinnedAt",
+            "columnName": "pinnedAt",
+            "affinity": "INTEGER",
             "notNull": true
           },
           {
-            "fieldPath": "wallpaperBlur",
-            "columnName": "wallpaperBlur",
-            "affinity": "REAL",
+            "fieldPath": "wallpaper",
+            "columnName": "wallpaper",
+            "affinity": "TEXT",
             "notNull": true
           },
           {
@@ -583,7 +583,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '150d48d40ad2c4e262c3e22eeb50a589')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ecb031c977cc401dfa30961e728fc786')"
     ]
   }
 }

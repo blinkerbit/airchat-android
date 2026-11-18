@@ -879,7 +879,7 @@ private fun Avatar(name: String, size: Int, isOnline: Boolean = false) {
 }
 
 @Composable
-private fun CallButtons(conversationId: String, peer: String) {
+internal fun CallButtons(conversationId: String, peer: String) {
     val context = LocalContext.current
     var pendingMode by remember { mutableStateOf("audio") }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
@@ -1200,7 +1200,7 @@ fun ChatBubbleHost(conversationId: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuery: String = "") {
+internal fun Thread(model: ChatViewModel, conversation: Conversation?, searchQuery: String = "") {
     val context = LocalContext.current
     val messages by model.messages.collectAsState()
     val receipts by model.receipts.collectAsState()
@@ -1857,7 +1857,7 @@ private fun pinLabel(pin: ChatPin, messages: List<ChatMessage>): String {
 }
 
 @Composable
-private fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
+internal fun AddMemberDialog(model: ChatViewModel, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var chosen by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf("") }
@@ -2134,7 +2134,7 @@ private fun ForwardSheet(conversations: List<Conversation>, onDismiss: () -> Uni
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShareToAirdSheet(
+internal fun ShareToAirdSheet(
     shared: SharedContent,
     model: ChatViewModel,
     onDismiss: () -> Unit,

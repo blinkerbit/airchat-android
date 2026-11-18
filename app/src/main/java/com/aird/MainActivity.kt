@@ -1,6 +1,5 @@
 package com.aird
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.KeyguardManager
@@ -11,65 +10,25 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
-import android.provider.Settings
-import android.webkit.CookieManager
 import android.util.Rational
-import android.app.NotificationManager
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import com.aird.ui.LocalAirdReducedMotion
 import androidx.core.content.ContextCompat
-import com.aird.call.AirdTelecom
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.aird.app.AirdRoot
+import com.aird.app.Startup
 import com.aird.call.CallController
 import com.aird.call.CallPhase
-import com.aird.call.ui.CallBubble
-import com.aird.call.ui.CallScreen
 import com.aird.chat.data.ChatRepository
-import com.aird.chat.ui.ChatHome
 import com.aird.chat.ui.EnhancedSecureHub
-import com.aird.session.PasskeyDevice
-import com.aird.session.Session
-import com.aird.ui.PasskeyOffer
-import com.aird.ui.LoginScreen
-import com.aird.designsystem.theme.AirdTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 
 data class SharedContent(
@@ -78,13 +37,8 @@ data class SharedContent(
 )
 
 class MainActivity : ComponentActivity() {
-    private var privilegeStep = 0
     private var lockWipeGeneration = 0
     private var removeKeyguardListener: (() -> Unit)? = null
-    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        getSharedPreferences("aird", MODE_PRIVATE).edit().putBoolean(KEY_NOTIFICATIONS_PROMPTED, true).apply()
-        if (!granted) notificationDenied.value = true
-    }
     private val credential = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         AppLock.credentialFinished(result.resultCode == Activity.RESULT_OK)
     }
@@ -111,14 +65,13 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splash = installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setupLockscreenFlags()
-        try {
-            val cookie = CookieManager.getInstance().getCookie(ServerStore.get(this))
-            if (!cookie.isNullOrBlank()) AppLock.arm()
-        } catch (_: Exception) {
-        }
+        Startup.restore(this, fresh = savedInstanceState == null)
+        splash.setKeepOnScreenCondition { !Startup.ready.value }
+        window.decorView.postDelayed({ Startup.markReady() }, 2_500L)
         ContextCompat.registerReceiver(
             this,
             screenOff,
@@ -139,14 +92,6 @@ class MainActivity : ComponentActivity() {
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-            !notificationRequestSent &&
-            !getSharedPreferences("aird", MODE_PRIVATE).getBoolean(KEY_NOTIFICATIONS_PROMPTED, false)
-        ) {
-            notificationRequestSent = true
-            notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
         setContent { AirdRoot() }
         handleIntent(intent)
     }
@@ -171,7 +116,6 @@ class MainActivity : ComponentActivity() {
         if (stillLocked) EnhancedSecureHub.onDeviceLocked() else lockWipeGeneration++
         setupLockscreenFlags()
         WindowFlags.apply(this, secureChat.value, CallController.snapshot.value, isInPictureInPictureMode)
-        askPrivileges()
         com.aird.session.AirdSocket.ensureConnected()
         val call = CallController.snapshot.value
         if (call.phase == CallPhase.Incoming) {
@@ -333,26 +277,6 @@ class MainActivity : ComponentActivity() {
         startActivity(back)
     }
 
-    private fun askPrivileges() {
-        if (privilegeStep == 0 && Build.VERSION.SDK_INT >= 34) {
-            val manager = getSystemService(NotificationManager::class.java)
-            if (!manager.canUseFullScreenIntent()) {
-                privilegeStep = 1
-                startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
-                return
-            }
-        }
-        if (privilegeStep < 2) {
-            privilegeStep = 2
-            val power = getSystemService(PowerManager::class.java)
-            val prefs = getSharedPreferences("aird", MODE_PRIVATE)
-            if (!power.isIgnoringBatteryOptimizations(packageName) && !prefs.getBoolean("battery_prompted", false)) {
-                prefs.edit().putBoolean("battery_prompted", true).apply()
-                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-            }
-        }
-    }
-
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
         val action = intent.action
@@ -425,127 +349,5 @@ class MainActivity : ComponentActivity() {
         val openSearch = MutableStateFlow(false)
         val openLists = MutableStateFlow(false)
         const val ACTION_OPEN_SEARCH = "com.aird.OPEN_SEARCH"
-        private const val KEY_NOTIFICATIONS_PROMPTED = "notifications_prompted"
-        private var notificationRequestSent = false
-    }
-}
-
-@Composable
-private fun AppLockGate() {
-    val activity = androidx.compose.ui.platform.LocalContext.current as Activity
-    var nonce by remember { mutableIntStateOf(0) }
-    DisposableEffect(Unit) {
-        onDispose { AppLock.dismissPrompt() }
-    }
-    LaunchedEffect(nonce) {
-        AppLock.dismissPrompt()
-        AppLock.request(activity)
-    }
-    Box(
-        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Aird is locked", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(16.dp))
-            Button(onClick = { nonce++ }) { Text("Unlock") }
-        }
-    }
-}
-
-@Composable
-private fun AirdRoot() {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val signedIn by Session.signedIn.collectAsState()
-    val username by Session.username.collectAsState()
-    var passkeyChecked by remember { mutableStateOf(false) }
-    var passkeyOffer by remember { mutableStateOf(false) }
-    val call by CallController.snapshot.collectAsState()
-    val pip by MainActivity.inPip.collectAsState()
-    val notificationDenied by MainActivity.notificationDenied.collectAsState()
-    val backgroundOnly by CallController.backgroundOnly.collectAsState()
-    val closePip by CallController.pipClose.collectAsState()
-    val micNeeded by CallController.micNeeded.collectAsState()
-    val locked by AppLock.locked.collectAsState()
-    val secureChat by MainActivity.secureChat.collectAsState()
-    val micPrompt = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        CallController.microphoneAnswered(context, granted)
-    }
-    LaunchedEffect(micNeeded) {
-        if (micNeeded) micPrompt.launch(Manifest.permission.RECORD_AUDIO)
-    }
-    LaunchedEffect(closePip) {
-        if (closePip == 0) return@LaunchedEffect
-        (context as? MainActivity)?.leaveCallPip()
-    }
-    LaunchedEffect(call.phase, call.mode, call.minimized) {
-        val activity = context as? MainActivity ?: return@LaunchedEffect
-        activity.setupLockscreenFlags()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.isInPictureInPictureMode) {
-            activity.updatePipParams()
-        }
-    }
-    LaunchedEffect(Unit) {
-        val restored = Session.probe(context)
-        if (restored) AppLock.onSignedIn() else AppLock.disarm()
-    }
-    LaunchedEffect(secureChat, call.phase, call.mode, call.speaker, call.output, pip) {
-        val activity = context as? Activity ?: return@LaunchedEffect
-        WindowFlags.apply(activity, secureChat, call, pip)
-    }
-    LaunchedEffect(signedIn, username) {
-        if (!signedIn) {
-            passkeyChecked = true
-            passkeyOffer = false
-            return@LaunchedEffect
-        }
-        if (username.isBlank()) return@LaunchedEffect
-        passkeyOffer = PasskeyDevice.shouldOffer(context, username)
-        passkeyChecked = true
-    }
-    LaunchedEffect(signedIn) {
-        if (!signedIn) return@LaunchedEffect
-        AirdConnectionService.start(context)
-        AirdTelecom.register(context)
-        ChatRepository.prepare(context)
-        ChatRepository.refresh(context)
-    }
-    run {
-        AirdTheme {
-            val reduced = LocalAirdReducedMotion.current
-            val appear = if (reduced || call.phase == CallPhase.Incoming) EnterTransition.None else fadeIn(tween(220))
-            Box(Modifier.fillMaxSize()) {
-                if (!signedIn) LoginScreen(onSignedIn = {})
-                else if (!passkeyChecked) Box(Modifier.fillMaxSize())
-                else if (passkeyOffer && !locked) PasskeyOffer(username) { passkeyOffer = false }
-                else ChatHome()
-                if (locked && signedIn && call.phase == CallPhase.Idle && !pip) AppLockGate()
-                val outcome = call.phase == CallPhase.Idle && call.status.isNotEmpty()
-                val showCall = outcome || pip || (call.phase != CallPhase.Idle && !call.minimized)
-                val showBubble = call.minimized && call.mode == "video" && call.phase != CallPhase.Idle && !pip && !backgroundOnly
-                AnimatedVisibility(
-                    visible = showCall,
-                    modifier = Modifier.fillMaxSize(),
-                    enter = appear,
-                    exit = ExitTransition.None,
-                ) { CallScreen() }
-                AnimatedVisibility(
-                    visible = showBubble,
-                    modifier = Modifier.fillMaxSize(),
-                    enter = appear,
-                    exit = ExitTransition.None,
-                ) { CallBubble() }
-            }
-            if (notificationDenied) {
-                AlertDialog(
-                    onDismissRequest = { MainActivity.notificationDenied.value = false },
-                    title = { Text("Notifications") },
-                    text = { Text("Notifications are off, so new messages and calls will not alert you. You can allow them in system settings.") },
-                    confirmButton = {
-                        TextButton(onClick = { MainActivity.notificationDenied.value = false }) { Text("OK") }
-                    },
-                )
-            }
-        }
     }
 }

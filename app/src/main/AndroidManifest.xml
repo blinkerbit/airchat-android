@@ -68,7 +68,7 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:label="@string/app_name"
-            android:theme="@style/Theme.Aird"
+            android:theme="@style/Theme.Aird.Starting"
             android:supportsPictureInPicture="true"
             android:resizeableActivity="true"
             android:allowEmbedded="true"

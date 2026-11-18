@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.Aird" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Aird" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/aird_background</item>
+        <item name="android:colorBackground">@color/aird_background</item>
+        <item name="android:colorAccent">@color/aird_primary</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <style name="Theme.Aird.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/aird_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="windowSplashScreenIconBackgroundColor">@color/aird_splash_icon</item>
+        <item name="windowSplashScreenAnimationDuration">400</item>
+        <item name="postSplashScreenTheme">@style/Theme.Aird</item>
+    </style>
 </resources>
