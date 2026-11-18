@@ -229,8 +229,16 @@ class MainActivity : ComponentActivity() {
         val listener = KeyguardManager.KeyguardLockedStateListener { locked ->
             if (locked) EnhancedSecureHub.onDeviceLocked()
         }
-        km.addKeyguardLockedStateListener(ContextCompat.getMainExecutor(this), listener)
-        removeKeyguardListener = { km.removeKeyguardLockedStateListener(listener) }
+        try {
+            km.addKeyguardLockedStateListener(ContextCompat.getMainExecutor(this), listener)
+            removeKeyguardListener = {
+                try {
+                    km.removeKeyguardLockedStateListener(listener)
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: Exception) {
+        }
     }
 
     fun setupLockscreenFlags() {
