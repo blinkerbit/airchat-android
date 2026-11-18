@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aird.chat.data.AirdEntry
 import com.aird.chat.data.ChatRepository
+import com.aird.chat.data.FilesRepository
 
 enum class AirdPickMode { Attach, Save }
 
@@ -44,7 +45,7 @@ fun AirdPathSheet(
     var picked by remember { mutableStateOf(setOf<String>()) }
     var browsing by remember { mutableStateOf(false) }
     LaunchedEffect(path) {
-        val listed = ChatRepository.listFiles(context, path)
+        val listed = FilesRepository.listFiles(context, path)
         failed = listed == null
         entries = listed.orEmpty()
     }

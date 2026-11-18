@@ -17,6 +17,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.aird.chat.data.ChatRepository
+import com.aird.chat.data.FilesRepository
 import com.aird.chat.data.CollabRepository
 import com.aird.session.AirdHttp
 import com.aird.session.Session
@@ -37,7 +38,7 @@ class FileUploadWorker(
         val uri = Uri.parse(uriText)
         setForeground(foreground(0f))
         return try {
-            val op = ChatRepository.uploadUri(
+            val op = FilesRepository.uploadUri(
                 applicationContext,
                 dir,
                 name,

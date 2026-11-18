@@ -22,15 +22,23 @@ import com.aird.chat.model.ReadReceipt
 import com.aird.chat.model.nowIso
 import com.aird.chat.model.previewText
 import com.aird.core.transfer.RangeUpload
+import com.aird.data.db.LocalStore
+import com.aird.data.db.toEntity
+import com.aird.data.db.toModel
 import com.aird.session.AirdHttp
 import com.aird.session.AirdResponse
 import com.aird.session.AirdSocket
 import com.aird.session.Session
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -53,7 +61,6 @@ import java.io.File
 import java.net.URLEncoder
 
 object ChatRepository {
-    private const val DIRECT_UPLOAD_LIMIT = 32L * 1024 * 1024
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations
 
@@ -91,7 +98,14 @@ object ChatRepository {
     val pendingOpen: StateFlow<String> = _pendingOpen
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val events = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
     private val gate = Any()
+    private val jobGate = Any()
+    private var refreshJob: Job? = null
+    private var conversationsJob: Job? = null
+    private val persistJobs = HashMap<String, Job>()
+    @Volatile private var warmUser = ""
     private val mentionPattern = Regex("@([A-Za-z0-9_.\\-@]+)")
     private var lastTyping = 0L
     private var typingClear: kotlinx.coroutines.Job? = null
@@ -126,6 +140,7 @@ object ChatRepository {
         val me = Session.username.value
         if (me.isEmpty()) return
         rememberApp(context)
+        warmStart(context)
         watchNetwork(context)
         try {
             ChatE2E.prepare(context, me)
@@ -134,6 +149,73 @@ object ChatRepository {
         }
         flushOutbox(context)
     }
+
+    /** Paint the last known chat list, drafts and outbox before the network answers. */
+    suspend fun warmStart(context: Context) {
+        val me = Session.username.value
+        if (me.isEmpty() || warmUser == me) return
+        rememberApp(context)
+        LocalStore.revive(me)
+        OutboxStore.attach(context, me)
+        DraftStore.attach(context, me)
+        if (_conversations.value.isEmpty()) {
+            val cached = try {
+                LocalStore.db(context, me)?.conversations()?.all().orEmpty().map { it.toModel() }
+            } catch (err: Exception) {
+                if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                emptyList()
+            }
+            if (cached.isNotEmpty() && _conversations.value.isEmpty()) {
+                _conversations.value = cached
+                publishUnreadBadge()
+            }
+        }
+        warmUser = me
+        persistConversations()
+    }
+
+    private fun persistConversations() {
+        synchronized(jobGate) {
+            if (conversationsJob != null) return
+            conversationsJob = scope.launch {
+                var last: List<Conversation>? = null
+                _conversations.collect { items ->
+                    if (items === last) return@collect
+                    delay(800)
+                    val ctx = appContext ?: return@collect
+                    val user = Session.username.value
+                    if (user.isEmpty() || items.isEmpty() || warmUser != user) return@collect
+                    try {
+                        LocalStore.db(ctx, user)?.conversations()?.replace(items.mapIndexed { i, c -> c.toEntity(i) })
+                        last = items
+                    } catch (err: Exception) {
+                        if (err is kotlin.coroutines.cancellation.CancellationException) throw err
+                    }
+                }
+            }
+        }
+    }
+
+    /** Coalesces bursts of events into one quiet list refresh, at most 5s late. */
+    private fun scheduleRefresh(context: Context, delayMs: Long = 1200) {
+        val app = context.applicationContext
+        synchronized(jobGate) {
+            val now = SystemClock.elapsedRealtime()
+            val waiting = refreshJob?.isActive == true && refreshWaiting
+            if (waiting && now - refreshSince > 5_000) return
+            if (!waiting) refreshSince = now
+            if (waiting) refreshJob?.cancel()
+            refreshWaiting = true
+            refreshJob = scope.launch {
+                delay(delayMs)
+                synchronized(jobGate) { refreshWaiting = false }
+                refresh(app, quiet = true)
+            }
+        }
+    }
+
+    private var refreshSince = 0L
+    private var refreshWaiting = false
 
     suspend fun refresh(context: Context, quiet: Boolean = false, catchUp: Boolean = false) {
         rememberApp(context)
@@ -359,7 +441,8 @@ object ChatRepository {
 
     fun clearLocalChat(conversationId: String) {
         threadCache.remove(conversationId)
-        appContext?.let { ChatThreadStore.delete(it, Session.username.value, conversationId) }
+        val user = Session.username.value
+        appContext?.let { ctx -> scope.launch { ChatThreadStore.delete(ctx, user, conversationId) } }
         if (_activeId.value == conversationId) {
             _messages.value = emptyList()
         }
@@ -428,8 +511,6 @@ object ChatRepository {
         return true
     }
 
-    private var persistJob: kotlinx.coroutines.Job? = null
-
     private fun schedulePersist(conversationId: String = _activeId.value) {
         val ctx = appContext ?: return
         val user = Session.username.value
@@ -438,11 +519,16 @@ object ChatRepository {
         val receipts = _receipts.value
         val pins = _pins.value
         val more = _hasMore.value
-        persistJob?.cancel()
-        persistJob = scope.launch {
-            kotlinx.coroutines.delay(350)
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                ChatThreadStore.save(ctx, user, conversationId, messages, receipts, pins, more)
+        synchronized(jobGate) {
+            persistJobs[conversationId]?.cancel()
+            persistJobs[conversationId] = scope.launch {
+                delay(350)
+                withContext(NonCancellable) {
+                    try {
+                        ChatThreadStore.save(ctx, user, conversationId, messages, receipts, pins, more)
+                    } catch (_: Exception) {
+                    }
+                }
             }
         }
     }
@@ -781,10 +867,17 @@ object ChatRepository {
     fun clear() {
         unwatchNetwork()
         val user = Session.username.value
-        appContext?.let { ctx ->
-            OutboxStore.clear(ctx)
-            if (user.isNotEmpty()) ChatThreadStore.deleteUser(ctx, user)
+        warmUser = ""
+        synchronized(jobGate) {
+            persistJobs.values.forEach { it.cancel() }
+            persistJobs.clear()
+            refreshJob?.cancel()
         }
+        threadCache.clear()
+        OutboxStore.reset()
+        DraftStore.clear()
+        LocalStore.retire(user)
+        appContext?.let { ctx -> scope.launch { ChatThreadStore.deleteUser(ctx, user) } }
         _conversations.value = emptyList()
         _messages.value = emptyList()
         _activeId.value = ""
@@ -960,435 +1053,6 @@ object ChatRepository {
     private fun headerEncode(value: String): String =
         URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
-    suspend fun listFiles(context: Context, path: String): List<AirdEntry>? {
-        val clean = path.trim().trim('/')
-        val encoded = if (clean.isEmpty()) {
-            ""
-        } else {
-            clean.split('/').joinToString("/") { headerEncode(it) }
-        }
-        val response = try {
-            AirdHttp.get(context, "/api/files/$encoded")
-        } catch (_: Exception) {
-            return null
-        }
-        if (!response.ok) return null
-        val catalog = tagCatalog(context)
-        val files = response.json().optJSONArray("files") ?: return emptyList()
-        return buildList {
-            for (i in 0 until files.length()) {
-                val item = files.optJSONObject(i) ?: continue
-                val name = item.optString("name")
-                if (name.isEmpty()) continue
-                val child = if (clean.isEmpty()) name else "$clean/$name"
-                var entry = item.toEntry(name, child)
-                val catalogTags = catalog.tags.filter { t ->
-                    t.files.any { f -> f.trim().trim('/') == child }
-                }.map { it.name }
-                if (catalogTags.isNotEmpty()) {
-                    val merged = (entry.tags + catalogTags).distinct()
-                    entry = entry.copy(tags = merged)
-                }
-                add(entry)
-            }
-        }
-    }
-
-    suspend fun filesForTag(context: Context, tag: String): List<AirdEntry>? {
-        val match = tagCatalog(context).tags.find { it.name == tag } ?: return emptyList()
-        return match.files.map { raw ->
-            val path = raw.trim().trim('/')
-            val name = path.substringAfterLast('/').ifBlank { path }
-            AirdEntry(name, path, dir = false, tags = listOf(tag))
-        }
-    }
-
-    suspend fun tagCatalog(context: Context): TagCatalog {
-        val response = try {
-            AirdHttp.get(context, "/api/user-tags/browse-catalog")
-        } catch (_: Exception) {
-            return TagCatalog(emptyList(), emptyMap())
-        }
-        if (!response.ok) return TagCatalog(emptyList(), emptyMap())
-        val body = response.json()
-        val tags = buildList {
-            val arr = body.optJSONArray("tags") ?: JSONArray()
-            for (i in 0 until arr.length()) {
-                val item = arr.optJSONObject(i) ?: continue
-                val name = item.optString("name")
-                val id = item.optInt("id")
-                if (name.isEmpty() || id == 0) continue
-                val files = buildList {
-                    val paths = item.optJSONArray("files") ?: JSONArray()
-                    for (p in 0 until paths.length()) {
-                        val path = paths.optString(p).trim().trim('/')
-                        if (path.isNotEmpty()) add(path)
-                    }
-                }
-                add(UserTag(id, name, files))
-            }
-        }
-        val names = tags.map { it.name }.ifEmpty {
-            buildList {
-                val arr = body.optJSONArray("names") ?: JSONArray()
-                for (i in 0 until arr.length()) {
-                    val name = arr.optString(i)
-                    if (name.isNotEmpty()) add(name)
-                }
-            }
-        }
-        val colors = buildMap {
-            val obj = body.optJSONObject("colors") ?: return@buildMap
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                put(key, obj.optString(key))
-            }
-        }
-        return TagCatalog(names, colors, tags)
-    }
-
-    suspend fun createFolder(context: Context, parent: String, name: String): FileOp =
-        formOp(context, "/mkdir", mapOf("parent" to parent.trim().trim('/'), "name" to name.trim()), "Could not create the folder")
-
-    suspend fun deletePath(context: Context, path: String, folder: Boolean): FileOp =
-        formOp(
-            context,
-            "/delete",
-            mapOf("path" to path, "recursive" to if (folder) "1" else "0"),
-            "Could not delete",
-        )
-
-    suspend fun renamePath(context: Context, path: String, newName: String): FileOp =
-        formOp(context, "/rename", mapOf("path" to path, "new_name" to newName.trim()), "Could not rename")
-
-    suspend fun transferPath(context: Context, path: String, dest: String, move: Boolean): FileOp =
-        formOp(
-            context,
-            if (move) "/move" else "/copy",
-            mapOf("path" to path, "dest" to dest),
-            if (move) "Could not move" else "Could not copy",
-        )
-
-    suspend fun applyTag(context: Context, path: String, tag: String): FileOp {
-        val rel = path.trim().trim('/')
-        val name = tag.trim()
-        if (rel.isEmpty() || name.isEmpty()) return FileOp(false, "Could not tag")
-        val id = userTagId(context, name) ?: return FileOp(false, "Could not resolve tag")
-        val response = try {
-            AirdHttp.send(
-                context,
-                "/api/user-tags/$id/links",
-                "POST",
-                JSONObject().put("kind", "file").put("resource_key", rel),
-            )
-        } catch (err: Exception) {
-            return FileOp(false, err.message ?: "Could not tag")
-        }
-        if (response.ok) return FileOp(true, "")
-        val altResponse = try {
-            AirdHttp.send(
-                context,
-                "/api/user-tags/$id/links",
-                "POST",
-                JSONObject().put("kind", "file").put("resource_key", "/$rel"),
-            )
-        } catch (_: Exception) {
-            response
-        }
-        if (altResponse.ok) return FileOp(true, "")
-        return FileOp(false, fileMessage(response, "Could not tag"), response.code == 403)
-    }
-
-    suspend fun untagPath(context: Context, path: String, tag: String): FileOp {
-        val rel = path.trim().trim('/')
-        val id = tagCatalog(context).tags.find { it.name.equals(tag, ignoreCase = true) }?.id
-            ?: return FileOp(false, "Could not remove the tag")
-        val response = try {
-            AirdHttp.send(
-                context,
-                "/api/user-tags/$id/links",
-                "DELETE",
-                JSONObject().put("kind", "file").put("resource_key", rel),
-            )
-        } catch (err: Exception) {
-            return FileOp(false, err.message ?: "Could not remove the tag")
-        }
-        if (response.ok) return FileOp(true, "")
-        return FileOp(false, fileMessage(response, "Could not remove the tag"), response.code == 403)
-    }
-
-    private suspend fun userTagId(context: Context, name: String): Int? {
-        val cat = tagCatalog(context)
-        cat.tags.find { it.name.equals(name, ignoreCase = true) }?.id?.let { return it }
-        val created = try {
-            AirdHttp.send(
-                context,
-                "/api/user-tags",
-                "POST",
-                JSONObject().put("name", name),
-            )
-        } catch (_: Exception) {
-            null
-        }
-        if (created != null && created.ok) {
-            val id = created.json().optInt("id")
-            if (id != 0) return id
-        }
-        return tagCatalog(context).tags.find { it.name.equals(name, ignoreCase = true) }?.id
-    }
-
-    suspend fun uploadUri(
-        context: Context,
-        dir: String,
-        name: String,
-        uri: Uri,
-        size: Long,
-        cancelled: () -> Boolean,
-        onProgress: (Long, Long) -> Unit,
-    ): FileOp = withContext(Dispatchers.IO) {
-        val cleanDir = dir.trim().trim('/')
-        val cleanName = name.substringAfterLast('/').substringAfterLast('\\').trim().ifBlank { "file" }.take(255)
-        if (cancelled()) return@withContext FileOp(false, "cancelled")
-        if (size >= DIRECT_UPLOAD_LIMIT) {
-            val ranged = uploadRanged(context, cleanDir, cleanName, uri, size, cancelled, onProgress)
-            if (ranged != null) return@withContext ranged
-        }
-        val direct = uploadDirect(context, cleanDir, cleanName, uri, size, cancelled, onProgress)
-        if (direct.ok || size < 0 || !direct.message.contains("ranged", true)) return@withContext direct
-        return@withContext uploadRanged(context, cleanDir, cleanName, uri, size, cancelled, onProgress) ?: direct
-    }
-
-    private suspend fun uploadDirect(
-        context: Context,
-        dir: String,
-        name: String,
-        uri: Uri,
-        size: Long,
-        cancelled: () -> Boolean,
-        onProgress: (Long, Long) -> Unit,
-    ): FileOp {
-        val length = if (size >= 0) size else -1L
-        val response = try {
-            AirdHttp.postStream(
-                context,
-                "/upload",
-                length,
-                mapOf(
-                    "X-Upload-Dir" to headerEncode(dir),
-                    "X-Upload-Filename" to headerEncode(name),
-                ),
-                { context.contentResolver.openInputStream(uri) ?: error("Could not read the file") },
-                { sent -> onProgress(sent, length) },
-                cancelled,
-            )
-        } catch (err: Exception) {
-            if (cancelled() || err.message?.contains("cancelled") == true) return FileOp(false, "cancelled")
-            return FileOp(false, err.message ?: "Could not upload")
-        }
-        if (response.code == 0 || cancelled()) return FileOp(false, "cancelled")
-        if (response.ok) {
-            onProgress(length.coerceAtLeast(0), length.coerceAtLeast(0))
-            return FileOp(true, "")
-        }
-        return FileOp(false, fileMessage(response, "Could not upload"), response.code == 403)
-    }
-
-    private suspend fun uploadRanged(
-        context: Context,
-        dir: String,
-        name: String,
-        uri: Uri,
-        size: Long,
-        cancelled: () -> Boolean,
-        onProgress: (Long, Long) -> Unit,
-    ): FileOp? {
-        if (size <= 0) return null
-        val session = try {
-            AirdHttp.send(
-                context,
-                "/api/upload/range/session",
-                "POST",
-                JSONObject().put("upload_dir", dir).put("filename", name).put("total_size", size),
-            )
-        } catch (err: Exception) {
-            if (cancelled()) return FileOp(false, "cancelled")
-            return FileOp(false, err.message ?: "Could not upload")
-        }
-        if (session.code == 400 && session.body.contains("threshold")) return null
-        if (!session.ok) return FileOp(false, fileMessage(session, "Could not upload"), session.code == 403)
-        val body = session.json()
-        val uploadId = body.optString("upload_id")
-        if (uploadId.isEmpty()) return FileOp(false, "Could not upload")
-        val chunk = body.optLong("chunk_bytes", RangeUpload.CHUNK_BYTES).coerceIn(256L * 1024, RangeUpload.CHUNK_BYTES)
-        val done = coveredRanges(context, uploadId)
-        val sent = java.util.concurrent.atomic.AtomicLong(coveredBytes(done, size))
-        onProgress(sent.get(), size)
-        val pending = RangeUpload.chunks(size, chunk).filter { slice ->
-            !rangeCovered(done, slice.start, slice.endInclusive)
-        }
-        if (cancelled()) return FileOp(false, "cancelled")
-        val failure = java.util.concurrent.atomic.AtomicReference<FileOp?>(null)
-        val gate = Semaphore(RangeUpload.parallelism(chunk))
-        coroutineScope {
-            pending.map { slice ->
-                async {
-                    if (failure.get() != null || cancelled()) return@async
-                    gate.withPermit {
-                        if (failure.get() != null || cancelled()) return@withPermit
-                        val bytes = readSlice(context, uri, slice.start, slice.length.toInt())
-                        if (bytes.size.toLong() != slice.length) {
-                            failure.compareAndSet(null, FileOp(false, "Could not read the file"))
-                            return@withPermit
-                        }
-                        val response = try {
-                            AirdHttp.putBytes(
-                                context,
-                                "/api/upload/range/${URLEncoder.encode(uploadId, "UTF-8")}",
-                                bytes,
-                                mapOf("Content-Range" to slice.contentRange),
-                                cancelled,
-                            )
-                        } catch (err: Exception) {
-                            val message = if (cancelled() || err.message?.contains("cancelled") == true) "cancelled" else err.message ?: "Could not upload"
-                            failure.compareAndSet(null, FileOp(false, message))
-                            return@withPermit
-                        }
-                        if (response.code == 0 || cancelled()) {
-                            failure.compareAndSet(null, FileOp(false, "cancelled"))
-                            return@withPermit
-                        }
-                        if (!response.ok) {
-                            failure.compareAndSet(null, FileOp(false, fileMessage(response, "Could not upload")))
-                            return@withPermit
-                        }
-                        onProgress(sent.addAndGet(bytes.size.toLong()), size)
-                    }
-                }
-            }.awaitAll()
-        }
-        failure.get()?.let { failed ->
-            if (failed.message == "cancelled") {
-                try {
-                    AirdHttp.send(context, "/api/upload/range/${URLEncoder.encode(uploadId, "UTF-8")}", "DELETE", JSONObject())
-                } catch (_: Exception) {
-                }
-            }
-            return failed
-        }
-        return FileOp(true, "")
-    }
-
-    suspend fun uploadToFolder(context: Context, dir: String, name: String, file: File): FileOp {
-        val response = try {
-            AirdHttp.postRaw(
-                context,
-                "/upload",
-                file,
-                mapOf(
-                    "X-Upload-Dir" to headerEncode(dir.trim().trim('/')),
-                    "X-Upload-Filename" to headerEncode(name),
-                ),
-            )
-        } catch (err: Exception) {
-            return FileOp(false, err.message ?: "Could not upload")
-        }
-        if (response.ok) return FileOp(true, "")
-        return FileOp(false, fileMessage(response, "Could not upload"), response.code == 403)
-    }
-
-    private suspend fun coveredRanges(context: Context, uploadId: String): List<LongArray> {
-        val response = try {
-            AirdHttp.get(context, "/api/upload/range/${URLEncoder.encode(uploadId, "UTF-8")}/status")
-        } catch (_: Exception) {
-            return emptyList()
-        }
-        if (!response.ok) return emptyList()
-        val ranges = response.json().optJSONArray("ranges") ?: return emptyList()
-        return buildList {
-            for (i in 0 until ranges.length()) {
-                val pair = ranges.optJSONArray(i) ?: continue
-                if (pair.length() >= 2) add(longArrayOf(pair.optLong(0), pair.optLong(1)))
-            }
-        }
-    }
-
-    private fun coveredBytes(ranges: List<LongArray>, size: Long): Long {
-        var total = 0L
-        ranges.forEach { range ->
-            val start = range[0].coerceAtLeast(0)
-            val end = range[1].coerceAtMost(size - 1)
-            if (end >= start) total += end - start + 1
-        }
-        return total.coerceAtMost(size)
-    }
-
-    private fun rangeCovered(ranges: List<LongArray>, start: Long, end: Long): Boolean {
-        var cursor = start
-        ranges.sortedBy { it[0] }.forEach { range ->
-            if (range[1] < cursor) return@forEach
-            if (range[0] > cursor) return false
-            cursor = maxOf(cursor, range[1] + 1)
-            if (cursor > end) return true
-        }
-        return cursor > end
-    }
-
-    private fun readSlice(context: Context, uri: Uri, start: Long, len: Int): ByteArray {
-        try {
-            context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
-                java.io.FileInputStream(descriptor.fileDescriptor).channel.use { channel ->
-                    val buf = java.nio.ByteBuffer.allocate(len)
-                    channel.position(start)
-                    while (buf.hasRemaining()) {
-                        if (channel.read(buf) < 0) break
-                    }
-                    return buf.array().copyOf(buf.position())
-                }
-            }
-        } catch (_: Exception) {
-        }
-        return context.contentResolver.openInputStream(uri)?.use { input ->
-            var left = start
-            while (left > 0) {
-                val skipped = input.skip(left)
-                if (skipped > 0) {
-                    left -= skipped
-                } else if (input.read() < 0) {
-                    break
-                } else {
-                    left -= 1
-                }
-            }
-            val out = ByteArray(len)
-            var got = 0
-            while (got < len) {
-                val n = input.read(out, got, len - got)
-                if (n < 0) break
-                got += n
-            }
-            if (got == len) out else out.copyOf(got)
-        } ?: ByteArray(0)
-    }
-
-    private suspend fun formOp(context: Context, path: String, fields: Map<String, String>, fallback: String): FileOp {
-        val response = try {
-            AirdHttp.postForm(context, path, fields)
-        } catch (err: Exception) {
-            return FileOp(false, err.message ?: fallback)
-        }
-        if (response.ok) return FileOp(true, "")
-        return FileOp(false, fileMessage(response, fallback), response.code == 403)
-    }
-
-    private fun fileMessage(response: AirdResponse, fallback: String): String {
-        val json = response.json().optString("error")
-        if (json.isNotBlank()) return json.take(180)
-        val plain = response.body.trim().lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
-        if (plain.isBlank() || plain.startsWith("<")) return fallback
-        return plain.take(180)
-    }
-
     suspend fun edit(context: Context, message: ChatMessage, text: String) {
         val body = text.trim()
         val convId = message.conversationId
@@ -1541,7 +1205,7 @@ object ChatRepository {
             done == 0 -> "Not forwarded: " + skipped.joinToString("; ")
             else -> "Forwarded to $done. Not forwarded: " + skipped.joinToString("; ")
         }
-        refresh(context, quiet = true)
+        scheduleRefresh(context, delayMs = 300)
     }
 
     private fun conversationLabel(id: String): String =
@@ -1563,12 +1227,19 @@ object ChatRepository {
         }
     }
 
+    /** Socket frames arrive on the main thread; parse and route them on one background lane. */
     fun onEvent(context: Context, raw: String) {
-        val data = try {
-            JSONObject(raw)
-        } catch (_: Exception) {
-            return
+        events.launch {
+            val data = try {
+                JSONObject(raw)
+            } catch (_: Exception) {
+                return@launch
+            }
+            handleEvent(context, data)
         }
+    }
+
+    private fun handleEvent(context: Context, data: JSONObject) {
         when (data.optString("type")) {
             "chat_message" -> {
                 val message = data.optJSONObject("message") ?: return
@@ -1599,7 +1270,8 @@ object ChatRepository {
                     bumpUnreadIfNeeded(context, convId, item.mine)
                     val looking = AppForeground.resumed() && convId == _activeId.value
                     if (!item.mine && !looking) scope.launch { stageNotificationMedia(context, item) }
-                    refresh(context, quiet = true)
+                    if (_conversations.value.none { it.id == convId }) refresh(context, quiet = true)
+                    else scheduleRefresh(context)
                 }
             }
             "chat_notify" -> {
@@ -1639,7 +1311,7 @@ object ChatRepository {
                         touchConversation(context, convId, preview = preview, updatedAt = nowIso())
                     }
                     // chat_message already counted this one. The refresh settles the total.
-                    refresh(context, quiet = true)
+                    scheduleRefresh(context)
                 }
             }
             "chat_message_edited" -> {
@@ -1786,7 +1458,7 @@ object ChatRepository {
         if (!replyToId.isNullOrEmpty()) socket.put("reply_to_id", replyToId)
         if (AirdSocket.send(socket.toString()) && awaitEcho(localId)) {
             dropOutbox(context, localId)
-            refresh(context, quiet = true)
+            scheduleRefresh(context)
             pinCollab(context, convId, body)
             return true
         }
@@ -1796,7 +1468,7 @@ object ChatRepository {
         }
         if (posted.ok) {
             dropOutbox(context, localId)
-            refresh(context, quiet = true)
+            scheduleRefresh(context)
             pinCollab(context, convId, body)
         }
         return posted.ok
@@ -1810,14 +1482,12 @@ object ChatRepository {
         }
     }
 
+    /** Resumes the moment the socket echo replaces the optimistic row. */
     private suspend fun awaitEcho(localId: String?): Boolean {
         if (localId == null) return true
-        repeat(15) {
-            kotlinx.coroutines.delay(100)
-            val row = _messages.value.firstOrNull { it.id == localId }
-            if (row == null || !row.pending) return true
-        }
-        return false
+        return withTimeoutOrNull(1_500) {
+            _messages.first { rows -> rows.none { it.id == localId && it.pending } }
+        } != null
     }
 
     private suspend fun postText(
@@ -2042,7 +1712,7 @@ object ChatRepository {
                 }
                 touchConversation(context, convId, preview = previewForList(item), updatedAt = item.createdAt)
             }
-            refresh(context, quiet = true)
+            scheduleRefresh(context)
             return null
         } finally {
             _uploading.value = false
@@ -2472,43 +2142,4 @@ object ChatRepository {
     }
 
     private data class UploadPart(val name: String, val mime: String, val body: RequestBody)
-}
-
-data class AirdEntry(
-    val name: String,
-    val path: String,
-    val dir: Boolean,
-    val size: String = "",
-    val modified: String = "",
-    val tags: List<String> = emptyList(),
-    val shared: Boolean = false,
-)
-
-data class UserTag(val id: Int, val name: String, val files: List<String>)
-
-data class TagCatalog(
-    val names: List<String>,
-    val colors: Map<String, String>,
-    val tags: List<UserTag> = emptyList(),
-)
-
-data class FileOp(val ok: Boolean, val message: String, val forbidden: Boolean = false)
-
-private fun JSONObject.toEntry(name: String, path: String): AirdEntry {
-    val tags = buildList {
-        val arr = optJSONArray("tags") ?: return@buildList
-        for (i in 0 until arr.length()) {
-            val tag = arr.optString(i)
-            if (tag.isNotEmpty()) add(tag)
-        }
-    }
-    return AirdEntry(
-        name = name,
-        path = path,
-        dir = optBoolean("is_dir"),
-        size = optString("size_str"),
-        modified = optString("modified"),
-        tags = tags,
-        shared = optBoolean("is_shared"),
-    )
 }

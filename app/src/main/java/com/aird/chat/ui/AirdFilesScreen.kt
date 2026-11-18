@@ -106,6 +106,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aird.chat.data.AirdEntry
 import com.aird.chat.data.ChatRepository
+import com.aird.chat.data.FilesRepository
 import com.aird.core.transfer.RangeUpload
 import com.aird.discovery.DiscoveryManager
 import com.aird.transfer.FileUploadWorker
@@ -292,7 +293,7 @@ fun AirdFilesScreen(
             return
         }
         scope.launch {
-            val op = ChatRepository.uploadUri(
+            val op = FilesRepository.uploadUri(
                 context,
                 dir,
                 safeFileName(leaf),
@@ -341,7 +342,7 @@ fun AirdFilesScreen(
 
     BackHandler(onBack = ::goUp)
     LaunchedEffect(Unit) {
-        catalog = ChatRepository.tagCatalog(context)
+        catalog = FilesRepository.tagCatalog(context)
     }
     LaunchedEffect(shareWith) {
         if (shareWith != null && chats.isEmpty()) ChatRepository.refresh(context, quiet = true)
@@ -350,7 +351,7 @@ fun AirdFilesScreen(
     suspend fun finish(op: FileOp, okText: String) {
         notice = if (op.ok) okText else op.message
         if (op.ok) {
-            catalog = ChatRepository.tagCatalog(context)
+            catalog = FilesRepository.tagCatalog(context)
             reload += 1
             clearSelection()
             dialog = FilesDialog.None
@@ -443,7 +444,7 @@ fun AirdFilesScreen(
                                 failed = "Already in this folder"
                                 return@forEach
                             }
-                            val op = ChatRepository.transferPath(context, entry.path, dest, job.move)
+                            val op = FilesRepository.transferPath(context, entry.path, dest, job.move)
                             if (!op.ok && failed.isEmpty()) failed = op.message
                         }
                         busy = false
@@ -652,9 +653,9 @@ fun AirdFilesScreen(
                         scope.launch {
                             busy = true
                             val op = if (shown is FilesDialog.Rename) {
-                                ChatRepository.renamePath(context, shown.entry.path, draft.trim())
+                                FilesRepository.renamePath(context, shown.entry.path, draft.trim())
                             } else {
-                                ChatRepository.createFolder(context, folder, draft.trim())
+                                FilesRepository.createFolder(context, folder, draft.trim())
                             }
                             busy = false
                             finish(op, if (renaming) "Renamed" else "Folder created")
@@ -678,7 +679,7 @@ fun AirdFilesScreen(
                             busy = true
                             var failed = ""
                             shown.entries.forEach { entry ->
-                                val op = ChatRepository.deletePath(context, entry.path, entry.dir)
+                                val op = FilesRepository.deletePath(context, entry.path, entry.dir)
                                 if (!op.ok && failed.isEmpty()) failed = op.message
                             }
                             busy = false
@@ -710,7 +711,7 @@ fun AirdFilesScreen(
                     busy = true
                     var failed: FileOp? = null
                     shown.entries.forEach { entry ->
-                        val op = ChatRepository.applyTag(context, entry.path, name)
+                        val op = FilesRepository.applyTag(context, entry.path, name)
                         if (!op.ok && failed == null) failed = op
                     }
                     busy = false
@@ -720,7 +721,7 @@ fun AirdFilesScreen(
             onRemove = { entry, name ->
                 scope.launch {
                     busy = true
-                    val op = ChatRepository.untagPath(context, entry.path, name)
+                    val op = FilesRepository.untagPath(context, entry.path, name)
                     busy = false
                     finish(op, "Tag removed")
                 }
@@ -986,8 +987,8 @@ private fun FileList(
         val first = entries.isEmpty()
         if (first) loading = true
         val listed = when (place) {
-            is FilesPlace.Folder -> ChatRepository.listFiles(context, place.path)
-            is FilesPlace.Tag -> ChatRepository.filesForTag(context, place.name)
+            is FilesPlace.Folder -> FilesRepository.listFiles(context, place.path)
+            is FilesPlace.Tag -> FilesRepository.filesForTag(context, place.name)
         }
         failed = listed == null
         entries = listed.orEmpty().sortedWith(compareBy<AirdEntry>({ !it.dir }, { it.name.lowercase() }))

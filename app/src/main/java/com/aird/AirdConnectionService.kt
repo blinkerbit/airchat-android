@@ -38,8 +38,8 @@ class AirdConnectionService : Service() {
             hooked = true
             val app = applicationContext
             AirdSocket.addListener { raw ->
-                CallController.onEvent(app, raw)
                 ChatRepository.onEvent(app, raw)
+                if (raw.contains("\"call_")) CallController.onEvent(app, raw)
             }
             // Every (re)connect: catch up on anything sent while the link was down.
             AirdSocket.addOpenListener {

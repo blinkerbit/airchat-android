@@ -158,32 +158,9 @@ private object VoiceNoteController {
 internal fun chatImageLoader(context: Context): ImageLoader = ChatImages.loader(context)
 
 private object ChatImages {
-    @Volatile private var loader: ImageLoader? = null
-    @Volatile private var staticLoader: ImageLoader? = null
+    fun loader(context: Context): ImageLoader = com.aird.data.net.AirdImages.loader(context)
 
-    fun loader(context: Context): ImageLoader {
-        loader?.let { return it }
-        return synchronized(this) {
-            loader ?: ImageLoader.Builder(context.applicationContext)
-                .okHttpClient(AirdHttp.client)
-                .components {
-                    add(GifDecoder.Factory())
-                    if (Build.VERSION.SDK_INT >= 28) add(ImageDecoderDecoder.Factory())
-                }
-                .build()
-                .also { loader = it }
-        }
-    }
-
-    fun staticLoader(context: Context): ImageLoader {
-        staticLoader?.let { return it }
-        return synchronized(this) {
-            staticLoader ?: ImageLoader.Builder(context.applicationContext)
-                .okHttpClient(AirdHttp.client)
-                .build()
-                .also { staticLoader = it }
-        }
-    }
+    fun staticLoader(context: Context): ImageLoader = com.aird.data.net.AirdImages.stillLoader(context)
 }
 
 private fun ChatAttachment.playsInline(): Boolean {

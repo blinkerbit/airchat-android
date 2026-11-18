@@ -60,6 +60,19 @@ object AirdSocket {
     private val _failed = MutableStateFlow(false)
     val failed: StateFlow<Boolean> = _failed
 
+    enum class Link { Online, Connecting, Offline }
+
+    private val _link = MutableStateFlow(Link.Offline)
+    val link: StateFlow<Link> = _link
+
+    private fun publishLink() {
+        _link.value = when {
+            open -> Link.Online
+            running && !_failed.value -> Link.Connecting
+            else -> Link.Offline
+        }
+    }
+
     private val reconnect = Runnable {
         val app = appContext ?: return@Runnable
         connect(app)
@@ -118,6 +131,7 @@ object AirdSocket {
         }
         socket?.cancel()
         socket = null
+        publishLink()
     }
 
     fun send(payload: String): Boolean = open && socket?.send(payload) == true
@@ -125,7 +139,7 @@ object AirdSocket {
     private fun connect(context: Context) {
         if (!running) return
         handler.removeCallbacks(reconnect)
-        CookieManager.getInstance().flush()
+        CookieFlush.soon()
         val server = ServerStore.get(context)
         if (!HostPolicy.isSafeRemoteUrl(server)) {
             setFailed(true)
@@ -143,6 +157,7 @@ object AirdSocket {
         open = false
         socket = null
         old?.cancel()
+        publishLink()
         socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (mine != generation) {
@@ -197,6 +212,7 @@ object AirdSocket {
             if (mine != generation) return@post
             open = false
             socket = null
+            publishLink()
             if (!running) return@post
             if (auth) lastAuthClose = true
             attempts += 1
@@ -220,11 +236,8 @@ object AirdSocket {
     }
 
     private fun setFailed(value: Boolean) {
-        if (_failed.value == value) {
-            notifyState()
-            return
-        }
         _failed.value = value
+        publishLink()
         notifyState()
     }
 

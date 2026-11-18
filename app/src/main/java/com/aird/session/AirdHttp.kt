@@ -51,7 +51,7 @@ object AirdHttp {
     suspend fun postForm(context: Context, path: String, fields: Map<String, String>): AirdResponse =
         withContext(Dispatchers.IO) {
             val url = open(context, path) ?: return@withContext blocked()
-            CookieManager.getInstance().flush()
+            CookieFlush.soon()
             val token = xsrf(ServerStore.get(context))
             val form = FormBody.Builder()
             if (token.isNotEmpty()) form.add("_xsrf", token)
@@ -114,7 +114,7 @@ object AirdHttp {
     ): AirdResponse {
         if (cancelled()) return AirdResponse(0, "cancelled")
         val url = open(context, path) ?: return blocked()
-        CookieManager.getInstance().flush()
+        CookieFlush.soon()
         val builder = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
@@ -131,7 +131,7 @@ object AirdHttp {
     suspend fun postRaw(context: Context, path: String, file: File, headers: Map<String, String>): AirdResponse =
         withContext(Dispatchers.IO) {
             val url = open(context, path) ?: return@withContext blocked()
-            CookieManager.getInstance().flush()
+            CookieFlush.soon()
             val builder = Request.Builder()
                 .url(url)
                 .header("Accept", "*/*")
@@ -148,7 +148,7 @@ object AirdHttp {
     suspend fun upload(context: Context, path: String, body: RequestBody): AirdResponse =
         withContext(Dispatchers.IO) {
             val url = open(context, path) ?: return@withContext blocked()
-            CookieManager.getInstance().flush()
+            CookieFlush.soon()
             val builder = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
@@ -169,7 +169,7 @@ object AirdHttp {
         onProgress: (bytes: Long, total: Long) -> Unit = { _, _ -> },
     ): String = withContext(Dispatchers.IO) {
         val url = open(context, path) ?: error("Blocked URL")
-        CookieManager.getInstance().flush()
+        CookieFlush.soon()
         dest.parentFile?.mkdirs()
         val builder = Request.Builder()
             .url(url)
@@ -228,7 +228,7 @@ object AirdHttp {
     private suspend fun request(context: Context, path: String, method: String, body: JSONObject?): AirdResponse =
         withContext(Dispatchers.IO) {
             val url = open(context, path) ?: return@withContext blocked()
-            CookieManager.getInstance().flush()
+            CookieFlush.soon()
             val builder = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
