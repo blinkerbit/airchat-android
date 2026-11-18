@@ -40,36 +40,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-val LocalAirdReducedMotion = compositionLocalOf { false }
-
-@Composable
-fun ProvideAirdMotion(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    var reduced by remember { mutableStateOf(animatorScale(context) == 0f) }
-    DisposableEffect(context) {
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean) {
-                reduced = animatorScale(context) == 0f
-            }
-        }
-        context.contentResolver.registerContentObserver(
-            Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE),
-            false,
-            observer,
-        )
-        reduced = animatorScale(context) == 0f
-        onDispose { context.contentResolver.unregisterContentObserver(observer) }
-    }
-    CompositionLocalProvider(LocalAirdReducedMotion provides reduced, content = content)
-}
-
-private fun animatorScale(context: Context): Float {
-    return Settings.Global.getFloat(
-        context.contentResolver,
-        Settings.Global.ANIMATOR_DURATION_SCALE,
-        1f,
-    )
-}
+val LocalAirdReducedMotion get() = com.aird.designsystem.motion.LocalReducedMotion
 
 @Composable
 fun pressScale(interaction: MutableInteractionSource): Modifier {

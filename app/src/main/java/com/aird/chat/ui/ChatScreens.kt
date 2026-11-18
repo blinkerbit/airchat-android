@@ -244,7 +244,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
     var keys by remember { mutableStateOf(false) }
     var enhanced by remember { mutableStateOf(false) }
     var settings by remember { mutableStateOf(false) }
-    val themeId by ThemeStore.id.collectAsState()
+    val themeId = ThemeStore.prefs.collectAsState().value.paletteId
     val locked by AppLock.locked.collectAsState()
     val wantSearch by MainActivity.openSearch.collectAsState()
     val wantLists by MainActivity.openLists.collectAsState()
@@ -391,7 +391,7 @@ fun ChatHome(model: ChatViewModel = viewModel()) {
                                     DropdownMenuItem(
                                         text = { Text(if (palette.id == themeId) "${palette.label}  •" else palette.label) },
                                         onClick = {
-                                            ThemeStore.set(context, palette.id)
+                                            ThemeStore.setPalette(context, palette.id)
                                             themeMenu = false
                                         },
                                     )

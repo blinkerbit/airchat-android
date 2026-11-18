@@ -77,7 +77,7 @@ fun AppSettingsSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var currentSkin by remember { mutableStateOf(EmojiPreferences.getSkinTone(context)) }
-    var currentTheme by remember { mutableStateOf(ThemeStore.id.value) }
+    var currentTheme by remember { mutableStateOf(ThemeStore.prefs.value.paletteId) }
     val reduced = LocalAirdReducedMotion.current
     var page by remember { mutableStateOf("home") }
     BackHandler {
@@ -282,7 +282,7 @@ fun AppSettingsSheet(onDismiss: () -> Unit) {
                                     .background(rowFill)
                                     .clickable {
                                         currentTheme = palette.id
-                                        ThemeStore.set(context, palette.id)
+                                        ThemeStore.setPalette(context, palette.id)
                                     }
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,

@@ -56,7 +56,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.aird.ui.LocalAirdReducedMotion
-import com.aird.ui.ProvideAirdMotion
 import androidx.core.content.ContextCompat
 import com.aird.call.AirdTelecom
 import com.aird.call.CallController
@@ -68,11 +67,9 @@ import com.aird.chat.ui.ChatHome
 import com.aird.chat.ui.EnhancedSecureHub
 import com.aird.session.PasskeyDevice
 import com.aird.session.Session
-import com.aird.theme.AirdPalettes
 import com.aird.ui.PasskeyOffer
-import com.aird.theme.ThemeStore
 import com.aird.ui.LoginScreen
-import com.aird.ui.theme.AirdTheme
+import com.aird.designsystem.theme.AirdTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 
 data class SharedContent(
@@ -131,7 +128,6 @@ class MainActivity : ComponentActivity() {
         EnhancedSecureHub.attach(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) watchKeyguard()
         AppForeground.install()
-        ThemeStore.load(this)
         ContextCompat.registerReceiver(
             this,
             pipActions,
@@ -464,7 +460,6 @@ private fun AirdRoot() {
     val username by Session.username.collectAsState()
     var passkeyChecked by remember { mutableStateOf(false) }
     var passkeyOffer by remember { mutableStateOf(false) }
-    val themeId by ThemeStore.id.collectAsState()
     val call by CallController.snapshot.collectAsState()
     val pip by MainActivity.inPip.collectAsState()
     val notificationDenied by MainActivity.notificationDenied.collectAsState()
@@ -515,8 +510,8 @@ private fun AirdRoot() {
         ChatRepository.prepare(context)
         ChatRepository.refresh(context)
     }
-    ProvideAirdMotion {
-        AirdTheme(AirdPalettes.byId(themeId)) {
+    run {
+        AirdTheme {
             val reduced = LocalAirdReducedMotion.current
             val appear = if (reduced || call.phase == CallPhase.Incoming) EnterTransition.None else fadeIn(tween(220))
             Box(Modifier.fillMaxSize()) {
