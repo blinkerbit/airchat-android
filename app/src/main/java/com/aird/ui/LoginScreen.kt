@@ -2,7 +2,7 @@ package com.aird.ui
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Color
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -12,31 +12,87 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import com.aird.security.HostPolicy
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.credentials.CreatePasswordRequest
+import androidx.credentials.CredentialManager
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.GetPasswordOption
+import androidx.credentials.PasswordCredential
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aird.ServerStore
+import com.aird.designsystem.components.AirdLoading
+import com.aird.designsystem.components.Avatar
+import com.aird.designsystem.theme.LocalAirdColors
+import com.aird.designsystem.theme.Spacing
+import com.aird.discovery.DiscoveryManager
+import com.aird.security.HostPolicy
+import com.aird.session.AirdHttp
 import com.aird.session.Session
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 private const val LOGIN_FIT = """
 (function(){
@@ -50,14 +106,43 @@ private const val LOGIN_FIT = """
 })();
 """
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun LoginScreen(onSignedIn: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val saved = ServerStore.get(context)
-    var browsing by remember { mutableStateOf(ServerStore.isValid(saved)) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
+    val saved = remember { ServerStore.get(context) }
+    var browsing by remember { mutableStateOf(false) }
     var server by remember { mutableStateOf(saved) }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
-    var serverOpen by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    val hosts by DiscoveryManager.hosts.collectAsStateWithLifecycle()
+
+    DisposableEffect(Unit) {
+        DiscoveryManager.onResume(context)
+        onDispose { DiscoveryManager.onPause() }
+    }
+
+    LaunchedEffect(Unit) {
+        try {
+            val manager = CredentialManager.create(context)
+            val result = manager.getCredential(
+                context,
+                GetCredentialRequest(listOf(GetPasswordOption())),
+            )
+            val credential = result.credential
+            if (credential is PasswordCredential) {
+                if (username.isEmpty()) username = credential.id
+                if (password.isEmpty()) password = credential.password
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     if (browsing) {
         BrowserLogin(
             onSignedIn = onSignedIn,
@@ -69,45 +154,210 @@ fun LoginScreen(onSignedIn: () -> Unit) {
         )
         return
     }
-    Column(Modifier.fillMaxSize().padding(24.dp)) {
-        Text("aird chat", style = MaterialTheme.typography.headlineLarge)
-        Text(
-            "Sign in with the same Aird account you use on the desktop.",
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        if (error.isNotEmpty()) {
-            Text(error, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+
+    fun openBrowser() {
+        if (!ServerStore.isValid(server)) {
+            error = "Use https, or http on your local network."
+            return
         }
-        TextButton(onClick = { serverOpen = true }, modifier = Modifier.padding(top = 16.dp)) { Text("Server") }
-        TextButton(
-            onClick = {
-                if (!ServerStore.isValid(server)) {
-                    error = "Use https, or http on your local network."
-                    serverOpen = true
-                    return@TextButton
-                }
-                error = ""
-                browsing = true
-            },
-        ) { Text("Sign in") }
+        ServerStore.set(context, server)
+        error = ""
+        browsing = true
     }
-    if (serverOpen) {
-        ServerDialog(
-            server = server,
-            onServer = { server = it },
-            error = error,
-            onDismiss = { serverOpen = false },
-            onSave = {
-                if (!ServerStore.isValid(server)) {
-                    error = "Use https, or http on your local network."
-                    return@ServerDialog
+
+    fun signIn() {
+        if (busy) return
+        if (!ServerStore.isValid(server)) {
+            error = "Use https, or http on your local network."
+            return
+        }
+        val user = username.trim()
+        if (user.isEmpty() || password.isEmpty()) {
+            error = "Enter your username and password."
+            return
+        }
+        busy = true
+        error = ""
+        ServerStore.set(context, server)
+        scope.launch {
+            val ok = try {
+                val response = AirdHttp.send(
+                    context,
+                    "/api/auth/login",
+                    "POST",
+                    JSONObject().put("username", user).put("password", password),
+                )
+                if (!response.ok) {
+                    error = when (response.code) {
+                        401 -> "Incorrect username or password."
+                        429 -> "Too many attempts. Try again shortly."
+                        0 -> "Could not reach the server."
+                        else -> response.json().optString("error").ifBlank { "Sign-in failed (${response.code})." }
+                    }
+                    false
+                } else {
+                    val name = response.json().optString("username").ifBlank { user }
+                    Session.markSignedIn(context, name)
+                    if (!Session.signedIn.value) Session.probe(context)
+                    savePasswordCredential(context, user, password)
+                    true
                 }
-                ServerStore.set(context, server)
-                error = ""
-                serverOpen = false
-                browsing = true
-            },
+            } catch (_: Exception) {
+                error = "Could not reach the server."
+                false
+            }
+            busy = false
+            if (ok) onSignedIn()
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = Spacing.xxxl, vertical = Spacing.xxl),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(Spacing.xl))
+        Box(
+            Modifier
+                .size(112.dp)
+                .clip(MaterialShapes.Cookie9Sided.toShape())
+                .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Avatar(name = "Aird", size = 72.dp)
+        }
+        Spacer(Modifier.height(Spacing.xxl))
+        Text(
+            "Aird",
+            style = MaterialTheme.typography.displaySmall,
+            color = MaterialTheme.colorScheme.onBackground,
         )
+        Spacer(Modifier.height(Spacing.sm))
+        Text(
+            "Sign in with your Aird account.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(Spacing.xxxl))
+
+        OutlinedTextField(
+            value = server,
+            onValueChange = { server = it; if (error.isNotEmpty()) error = "" },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Server") },
+            leadingIcon = { Icon(Icons.Rounded.Language, contentDescription = null) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, keyboardType = KeyboardType.Uri),
+            keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+        )
+
+        if (hosts.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.md))
+            Text(
+                "Nearby servers",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                hosts.forEach { host ->
+                    val selected = ServerStore.normalize(server).equals(host.url, ignoreCase = true)
+                    FilterChip(
+                        selected = selected,
+                        onClick = {
+                            server = host.url
+                            error = ""
+                        },
+                        label = { Text(host.name) },
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.lg))
+        OutlinedTextField(
+            value = username,
+            onValueChange = { username = it; if (error.isNotEmpty()) error = "" },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Username") },
+            leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+        )
+        Spacer(Modifier.height(Spacing.lg))
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it; if (error.isNotEmpty()) error = "" },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Password") },
+            leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
+            trailingIcon = {
+                IconButton(onClick = { showPassword = !showPassword }) {
+                    Icon(
+                        if (showPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                        contentDescription = if (showPassword) "Hide password" else "Show password",
+                    )
+                }
+            },
+            singleLine = true,
+            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, keyboardType = KeyboardType.Password),
+            keyboardActions = KeyboardActions(onDone = { focus.clearFocus(); signIn() }),
+        )
+
+        if (error.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.md))
+            Text(
+                error,
+                color = LocalAirdColors.current.danger,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        Spacer(Modifier.height(Spacing.xxl))
+        Button(
+            onClick = { signIn() },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+        ) {
+            if (busy) AirdLoading(size = 24.dp) else Text("Sign in")
+        }
+        Spacer(Modifier.height(Spacing.sm))
+        TextButton(
+            onClick = { openBrowser() },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Continue in browser (SSO / LDAP / passkey)")
+        }
+        Spacer(Modifier.height(Spacing.xl))
+    }
+}
+
+private suspend fun savePasswordCredential(context: Context, username: String, password: String) {
+    withContext(Dispatchers.Main.immediate) {
+        try {
+            val manager = CredentialManager.create(context)
+            manager.createCredential(
+                context,
+                CreatePasswordRequest(id = username, password = password),
+            )
+        } catch (_: Exception) {
+        }
     }
 }
 
@@ -115,12 +365,12 @@ fun LoginScreen(onSignedIn: () -> Unit) {
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit, onFail: (String) -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var serverOpen by remember { mutableStateOf(false) }
     var server by remember { mutableStateOf(ServerStore.get(context)) }
     var error by remember { mutableStateOf("") }
-    var page by remember { mutableStateOf(0) }
+    var page by remember { mutableIntStateOf(0) }
     val loginError = remember { mutableStateOf("") }
     Scaffold(
         topBar = {
@@ -139,7 +389,7 @@ private fun BrowserLogin(onSignedIn: () -> Unit, onClose: () -> Unit, onFail: (S
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
-                    setBackgroundColor(Color.WHITE)
+                    setBackgroundColor(AndroidColor.WHITE)
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.useWideViewPort = true
@@ -290,7 +540,7 @@ private fun ServerDialog(
                     singleLine = true,
                 )
                 if (error.isNotEmpty()) {
-                    Text(error, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+                    Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
                 }
             }
         },

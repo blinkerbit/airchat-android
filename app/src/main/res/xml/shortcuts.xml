@@ -11,4 +11,9 @@
             android:targetPackage="com.aird"
             android:targetClass="com.aird.MainActivity" />
     </shortcut>
+
+    <share-target android:targetClass="com.aird.MainActivity">
+        <data android:mimeType="*/*" />
+        <category android:name="com.aird.SHARE_TARGET" />
+    </share-target>
 </shortcuts>

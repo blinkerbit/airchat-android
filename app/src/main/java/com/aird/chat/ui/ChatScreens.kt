@@ -30,10 +30,15 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.mimeTypes
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -896,8 +901,8 @@ internal fun CallButtons(conversationId: String, peer: String) {
         if (needs.isEmpty()) CallController.start(context, conversationId, peer, mode)
         else launcher.launch(needs.toTypedArray())
     }
-    PressIconButton(onClick = { place("audio") }) { Icon(Icons.Default.Call, contentDescription = "Voice call") }
-    PressIconButton(onClick = { place("video") }) { Icon(Icons.Default.Videocam, contentDescription = "Video call") }
+    IconButton(onClick = { place("audio") }) { Icon(Icons.Default.Call, contentDescription = "Voice call", tint = MaterialTheme.colorScheme.onSurface) }
+    IconButton(onClick = { place("video") }) { Icon(Icons.Default.Videocam, contentDescription = "Video call", tint = MaterialTheme.colorScheme.onSurface) }
 }
 
 private enum class BubblePhase { Hold, Move, Drop, Cancel }
@@ -1239,6 +1244,8 @@ internal fun Thread(model: ChatViewModel, conversation: Conversation?, searchQue
     var picking by remember { mutableStateOf(false) }
     var saveTarget by remember { mutableStateOf<Pair<ChatMessage, List<ChatAttachment>>?>(null) }
     var pinCursor by remember(conversation?.id) { mutableStateOf(0) }
+    var reactBurst by remember { mutableStateOf("") }
+    var dropHighlight by remember { mutableStateOf(false) }
     fun sendUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val caption = draft.trim()
@@ -1246,6 +1253,30 @@ internal fun Thread(model: ChatViewModel, conversation: Conversation?, searchQue
         panel = ""
         model.attach(uris.take(10), caption, reply?.id)
         reply = null
+    }
+    val onDropUris = rememberUpdatedState<(List<Uri>) -> Unit> { sendUris(it) }
+    val dropTarget = remember {
+        object : DragAndDropTarget {
+            override fun onStarted(event: DragAndDropEvent) {
+                dropHighlight = true
+            }
+            override fun onEnded(event: DragAndDropEvent) {
+                dropHighlight = false
+            }
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                dropHighlight = false
+                val androidEvent = event.toAndroidDragEvent()
+                val clip = androidEvent.clipData ?: return false
+                val uris = buildList {
+                    for (i in 0 until clip.itemCount) {
+                        clip.getItemAt(i)?.uri?.let { add(it) }
+                    }
+                }
+                if (uris.isEmpty()) return false
+                onDropUris.value(uris)
+                return true
+            }
+        }
     }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         sendUris(uris)
@@ -1451,13 +1482,27 @@ internal fun Thread(model: ChatViewModel, conversation: Conversation?, searchQue
         }
     }
 
-    Column(
+    Box(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .background(
+                if (dropHighlight) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.12f),
+            )
+            .then(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    Modifier.dragAndDropTarget(
+                        shouldStartDragAndDrop = { event ->
+                            event.mimeTypes().any { it.startsWith("image/") || it.startsWith("video/") || it.startsWith("application/") || it == "*/*" || it.startsWith("text/") }
+                        },
+                        target = dropTarget,
+                    )
+                } else Modifier,
+            )
             .navigationBarsPadding()
-            .imePadding()
+            .imePadding(),
     ) {
+    Column(Modifier.fillMaxSize()) {
         if (pins.isNotEmpty()) {
             val index = pinCursor.mod(pins.size)
             val pin = pins[index]
@@ -1628,6 +1673,8 @@ internal fun Thread(model: ChatViewModel, conversation: Conversation?, searchQue
                         onDelete = { model.delete(message) },
                         onReact = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            reactBurst = it
+                            com.aird.designsystem.effects.SoundFx.playReact(context)
                             model.react(message, it)
                         },
                         onPin = { model.pin(message) },
@@ -1844,6 +1891,14 @@ internal fun Thread(model: ChatViewModel, conversation: Conversation?, searchQue
                 saveTarget = null
             },
         )
+    }
+    if (reactBurst.isNotEmpty()) {
+        com.aird.designsystem.effects.ReactionBurst(
+            emoji = reactBurst,
+            active = true,
+            onFinished = { reactBurst = "" },
+        )
+    }
     }
 }
 

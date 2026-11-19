@@ -70,6 +70,7 @@ import com.aird.call.CallPhase
 import com.aird.call.ui.CallBubble
 import com.aird.call.ui.CallScreen
 import com.aird.chat.data.ChatRepository
+import com.aird.data.PrivacyPrefs
 import com.aird.designsystem.motion.AirdMotion
 import com.aird.designsystem.motion.LocalReducedMotion
 import com.aird.designsystem.theme.AirdTheme
@@ -114,7 +115,7 @@ object Startup {
     }
 }
 
-private enum class Gate { Splash, Login, Passkey, App }
+private enum class Gate { Splash, Login, Passkey, Onboarding, App }
 
 @Composable
 fun AirdRoot() {
@@ -123,6 +124,7 @@ fun AirdRoot() {
     val username by Session.username.collectAsStateWithLifecycle()
     val ready by Startup.ready.collectAsStateWithLifecycle()
     var passkeyOffer by remember { mutableStateOf(false) }
+    var showOnboarding by remember { mutableStateOf(!PrivacyPrefs.onboardingDone(context)) }
     val call by CallController.snapshot.collectAsStateWithLifecycle()
     val pip by MainActivity.inPip.collectAsStateWithLifecycle()
     val notificationDenied by MainActivity.notificationDenied.collectAsStateWithLifecycle()
@@ -131,6 +133,7 @@ fun AirdRoot() {
     val micNeeded by CallController.micNeeded.collectAsStateWithLifecycle()
     val locked by AppLock.locked.collectAsStateWithLifecycle()
     val secureChat by MainActivity.secureChat.collectAsStateWithLifecycle()
+    val privacy by PrivacyPrefs.settings.collectAsStateWithLifecycle()
 
     val micPrompt = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         CallController.microphoneAnswered(context, granted)
@@ -152,17 +155,19 @@ fun AirdRoot() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.isInPictureInPictureMode) activity.updatePipParams()
     }
     LaunchedEffect(Unit) { Startup.confirm(context) }
-    LaunchedEffect(secureChat, call.phase, call.mode, call.speaker, call.output, pip) {
+    LaunchedEffect(secureChat, privacy.hideRecents, call.phase, call.mode, call.speaker, call.output, pip) {
         val activity = context as? Activity ?: return@LaunchedEffect
         WindowFlags.apply(activity, secureChat, call, pip)
     }
     LaunchedEffect(signedIn, username) {
         passkeyOffer = signedIn && username.isNotBlank() && PasskeyDevice.shouldOffer(context, username)
+        if (signedIn) showOnboarding = !PrivacyPrefs.onboardingDone(context)
     }
     LaunchedEffect(signedIn) {
         if (!signedIn) return@LaunchedEffect
         AirdConnectionService.start(context)
         AirdTelecom.register(context)
+        ChatRepository.warmStart(context)
         ChatRepository.prepare(context)
         ChatRepository.refresh(context, quiet = true)
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -179,6 +184,7 @@ fun AirdRoot() {
             !signedIn && !ready -> Gate.Splash
             !signedIn -> Gate.Login
             passkeyOffer && !locked -> Gate.Passkey
+            showOnboarding && !locked -> Gate.Onboarding
             else -> Gate.App
         }
         val ongoing = call.minimized && call.phase != CallPhase.Idle && !pip && (call.mode != "video" || backgroundOnly)
@@ -201,6 +207,7 @@ fun AirdRoot() {
                             Gate.Splash -> Box(Modifier.fillMaxSize())
                             Gate.Login -> LoginScreen(onSignedIn = {})
                             Gate.Passkey -> PasskeyOffer(username) { passkeyOffer = false }
+                            Gate.Onboarding -> OnboardingScreen(onFinished = { showOnboarding = false })
                             Gate.App -> AirdNavHost()
                         }
                     }

@@ -17,9 +17,11 @@ object AirdPalettes {
     const val DYNAMIC = "dynamic"
 
     val aird = AirdPalette("aird", "Aird Indigo", Color(0xFF5B5BF0), PaletteStyle.Expressive)
+    val midnight = AirdPalette("midnight", "Midnight OLED", Color(0xFF38BDF8), PaletteStyle.Content, forceDark = true)
 
     val all = listOf(
         aird,
+        midnight,
         AirdPalette("ocean", "Ocean", Color(0xFF0A84FF), PaletteStyle.TonalSpot),
         AirdPalette("emerald", "Emerald", Color(0xFF10B981), PaletteStyle.TonalSpot),
         AirdPalette("rose", "Rose", Color(0xFFE5487D), PaletteStyle.Expressive),

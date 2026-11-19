@@ -11,4 +11,10 @@
     <string name="server_change_stay">Stay</string>
     <string name="shortcut_search">Search</string>
     <string name="shortcut_search_long">Search conversations</string>
+    <string name="save_to_aird">Save to Aird</string>
+    <string name="widget_unread">Unread chats</string>
+    <string name="widget_unread_desc">Open conversations with unread messages</string>
+    <string name="widget_checklist">Checklist</string>
+    <string name="widget_checklist_desc">Tick items on your Aird list</string>
+    <string name="widget_loading">Loading…</string>
 </resources>

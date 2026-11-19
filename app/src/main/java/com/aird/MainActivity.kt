@@ -280,6 +280,7 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
         val action = intent.action
+        val shortcutId = intent.getStringExtra(Intent.EXTRA_SHORTCUT_ID).orEmpty()
         if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE || action == Intent.ACTION_PROCESS_TEXT) {
             val sharedText = when (action) {
                 Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty()
@@ -297,6 +298,9 @@ class MainActivity : ComponentActivity() {
             }
             if (sharedText.isNotEmpty() || uris.isNotEmpty()) {
                 sharedContent.value = SharedContent(text = sharedText, uris = uris)
+            }
+            if (shortcutId.isNotEmpty()) {
+                ChatRepository.requestOpen(shortcutId)
             }
         }
         if (action == ACTION_OPEN_SEARCH) openSearch.value = true

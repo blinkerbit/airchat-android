@@ -159,9 +159,16 @@ object WindowFlags {
     fun apply(activity: Activity, secureChat: Boolean, call: CallSnapshot, inPip: Boolean) {
         val window = activity.window
         val callUp = call.phase != CallPhase.Idle
-        if (secureChat && !callUp && !inPip) {
+        val hideRecents = com.aird.data.PrivacyPrefs.settings.value.hideRecents
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                activity.setRecentsScreenshotEnabled(!hideRecents)
+            } catch (_: Exception) {
+            }
+        }
+        if ((secureChat || hideRecents) && !callUp && !inPip) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        } else {
+        } else if (!hideRecents) {
             window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
         val earpiece = !inPip &&

@@ -14,6 +14,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
@@ -80,6 +81,7 @@ import com.aird.chat.data.CollabException
 import com.aird.chat.data.CollabRepository
 import com.aird.chat.data.ListAlarms
 import com.aird.core.model.Outline
+import com.aird.designsystem.effects.ConfettiBurst
 import com.aird.transfer.ListCatchUpWorker
 import com.aird.chat.model.CollabTag
 import com.aird.chat.model.ListArtifact
@@ -126,8 +128,22 @@ fun AirdListsScreen(onBack: () -> Unit) {
     var due by remember { mutableStateOf("") }
     var noteId by remember { mutableStateOf("") }
     var focusedId by remember { mutableStateOf("") }
+    var celebrate by remember { mutableStateOf(false) }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val reduced = LocalAirdReducedMotion.current
+
+    fun maybeCelebrate(list: ListArtifact, checkedId: String? = null, forceDoneIds: Set<String> = emptySet()) {
+        val boxes = list.items.filter { it.type == "checkbox" }
+        if (boxes.isEmpty()) return
+        val complete = boxes.all { item ->
+            when {
+                item.id in forceDoneIds -> true
+                checkedId != null && item.id == checkedId -> true
+                else -> item.done
+            }
+        }
+        if (complete) celebrate = true
+    }
 
     suspend fun loadBoard() {
         val board = CollabRepository.listBoard(context, "")
@@ -213,6 +229,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
     }
     val moving = lists.firstOrNull { it.id == movingId }
 
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.ime),
         topBar = {
@@ -363,6 +380,8 @@ fun AirdListsScreen(onBack: () -> Unit) {
                                 }
                             },
                             onMarkDone = { rows ->
+                                val marking = rows.filter { it.type == "checkbox" && !it.done }.map { it.id }.toSet()
+                                maybeCelebrate(list, forceDoneIds = marking)
                                 work {
                                     rows.filter { it.type == "checkbox" && !it.done }.forEach { item ->
                                         CollabRepository.setDone(context, list, item, true)
@@ -391,6 +410,7 @@ fun AirdListsScreen(onBack: () -> Unit) {
                             onClearDue = { due = "" },
                             onMove = { movingId = list.id },
                             onCheck = { item, checked ->
+                                if (checked) maybeCelebrate(list, checkedId = item.id)
                                 work {
                                     CollabRepository.setDone(context, list, item, checked)
                                     loadBoard()
@@ -538,6 +558,8 @@ fun AirdListsScreen(onBack: () -> Unit) {
             },
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } },
         )
+    }
+    ConfettiBurst(active = celebrate, onFinished = { celebrate = false })
     }
 }
 

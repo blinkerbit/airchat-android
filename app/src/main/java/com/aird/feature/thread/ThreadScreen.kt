@@ -30,6 +30,8 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsOff
+import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -52,20 +54,27 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.aird.app.LocalNavigator
 import com.aird.app.SharedKeys
 import com.aird.app.shared
 import com.aird.chat.data.ConversationPrefs
 import com.aird.chat.model.Conversation
+import com.aird.chat.ui.ChatAppearanceSheet
 import com.aird.chat.ui.ChatViewModel
 import com.aird.chat.ui.EnhancedSecureHub
 import com.aird.chat.ui.Thread
+import com.aird.chat.ui.parseWallpaperBrush
+import com.aird.chat.ui.wallpaperPhotoUri
 import com.aird.chat.data.ChatRepository
+import com.aird.data.ChatPrefsStore
 import com.aird.designsystem.components.Avatar
 import com.aird.designsystem.components.BackButton
 import com.aird.designsystem.components.BounceIconButton
@@ -89,57 +98,89 @@ fun ThreadScreen(id: String, pane: Boolean, onBack: () -> Unit) {
     var searching by rememberSaveable(id) { mutableStateOf(false) }
     var query by rememberSaveable(id) { mutableStateOf("") }
 
+    var appearance by remember { mutableStateOf(false) }
+    val chatPrefs by ChatPrefsStore.prefs.collectAsStateWithLifecycle()
+    val wallpaper = chatPrefs[id]?.wallpaper.orEmpty()
+    val wallpaperDim = chatPrefs[id]?.wallpaperDim ?: 0f
+    val wallpaperBrush = remember(wallpaper) { parseWallpaperBrush(wallpaper) }
+    val photoUri = remember(wallpaper) { wallpaperPhotoUri(wallpaper) }
+
     LaunchedEffect(id) { vm.ensureOpen() }
     BackHandler(enabled = searching) {
         searching = false
         query = ""
     }
 
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        AnimatedContent(
-            targetState = searching,
-            transitionSpec = { AirdMotion.through(reduced) },
-            label = "threadBar",
-        ) { search ->
-            if (search) {
-                Row(
-                    Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(horizontal = Spacing.sm, vertical = Spacing.sm),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    BackButton(onClick = {
-                        searching = false
-                        query = ""
-                    })
-                    SearchField(
-                        query = query,
-                        onQueryChange = { query = it },
-                        placeholder = "Search in this chat",
-                        autofocus = true,
-                        height = 48.dp,
-                        modifier = Modifier.weight(1f),
+    Box(Modifier.fillMaxSize()) {
+        when {
+            wallpaperBrush != null -> Box(Modifier.fillMaxSize().background(wallpaperBrush))
+            photoUri != null -> AsyncImage(
+                model = photoUri,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            else -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+        }
+        if (wallpaperDim > 0f && wallpaper.isNotBlank()) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = wallpaperDim)))
+        }
+        Column(Modifier.fillMaxSize()) {
+            AnimatedContent(
+                targetState = searching,
+                transitionSpec = { AirdMotion.through(reduced) },
+                label = "threadBar",
+            ) { search ->
+                if (search) {
+                    Row(
+                        Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(horizontal = Spacing.sm, vertical = Spacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        BackButton(onClick = {
+                            searching = false
+                            query = ""
+                        })
+                        SearchField(
+                            query = query,
+                            onQueryChange = { query = it },
+                            placeholder = "Search in this chat",
+                            autofocus = true,
+                            height = 48.dp,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                } else {
+                    ThreadTopBar(
+                        header = header,
+                        pane = pane,
+                        onBack = onBack,
+                        onSearch = { searching = true },
+                        onAppearance = { appearance = true },
                     )
                 }
-            } else {
-                ThreadTopBar(
-                    header = header,
-                    pane = pane,
-                    onBack = onBack,
-                    onSearch = { searching = true },
-                )
+            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (ready) {
+                    val conversation = conversations.firstOrNull { it.id == id } ?: Conversation(id, header.name, header.peer, "", 0, "")
+                    Thread(model, conversation, query)
+                }
             }
         }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (ready) {
-                val conversation = conversations.firstOrNull { it.id == id } ?: Conversation(id, header.name, header.peer, "", 0, "")
-                Thread(model, conversation, query)
-            }
-        }
+    }
+    if (appearance) {
+        ChatAppearanceSheet(conversationId = id, onDismiss = { appearance = false })
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ThreadTopBar(header: ThreadHeader, pane: Boolean, onBack: () -> Unit, onSearch: () -> Unit) {
+private fun ThreadTopBar(
+    header: ThreadHeader,
+    pane: Boolean,
+    onBack: () -> Unit,
+    onSearch: () -> Unit,
+    onAppearance: () -> Unit = {},
+) {
     val context = LocalContext.current
     val navigator = LocalNavigator.current
     val haptics = LocalAirdHaptics.current
@@ -228,6 +269,22 @@ private fun ThreadTopBar(header: ThreadHeader, pane: Boolean, onBack: () -> Unit
                         onClick = {
                             menu = false
                             navigator.openChatInfo(header.id)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Media, files & links") },
+                        leadingIcon = { Icon(Icons.Rounded.PhotoLibrary, null) },
+                        onClick = {
+                            menu = false
+                            navigator.openGallery(header.id)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Appearance") },
+                        leadingIcon = { Icon(Icons.Rounded.Palette, null) },
+                        onClick = {
+                            menu = false
+                            onAppearance()
                         },
                     )
                     DropdownMenuItem(

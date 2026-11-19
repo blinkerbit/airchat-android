@@ -74,6 +74,24 @@ object Session {
         return true
     }
 
+    /**
+     * Marks the session signed in after a native login that already populated the cookie jar.
+     * Does not clear cookies.
+     */
+    fun markSignedIn(context: Context, username: String) {
+        val name = username.trim()
+        if (name.isEmpty()) return
+        if (_username.value.isNotEmpty() && !_username.value.equals(name, ignoreCase = false)) {
+            ChatRepository.clear()
+        }
+        _username.value = name
+        _signedIn.value = true
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("user", name)
+            .putString("server", ServerStore.get(context))
+            .apply()
+    }
+
     fun signOut(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
         CookieManager.getInstance().removeAllCookies(null)

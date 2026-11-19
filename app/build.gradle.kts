@@ -13,7 +13,7 @@ val releaseKeyPassword = System.getenv("AIRD_KEY_PASSWORD") ?: findProperty("AIR
 
 android {
     namespace = "com.aird"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.aird"

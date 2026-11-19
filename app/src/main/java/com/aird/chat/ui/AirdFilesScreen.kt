@@ -63,7 +63,9 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FileUpload
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -94,9 +96,12 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -107,6 +112,9 @@ import androidx.compose.ui.unit.dp
 import com.aird.chat.data.AirdEntry
 import com.aird.chat.data.ChatRepository
 import com.aird.chat.data.FilesRepository
+import com.aird.feature.extras.FavoritesStore
+import com.aird.feature.extras.FavoritesStrip
+import com.aird.feature.extras.ShareLinkSheet
 import com.aird.core.transfer.RangeUpload
 import com.aird.discovery.DiscoveryManager
 import com.aird.transfer.FileUploadWorker
@@ -181,6 +189,12 @@ fun AirdFilesScreen(
     var uploadDest by remember { mutableStateOf("") }
     var uploadSerial by remember { mutableLongStateOf(0L) }
     var shareWith by remember { mutableStateOf<List<AirdEntry>?>(null) }
+    var shareLinkPaths by remember { mutableStateOf<List<String>?>(null) }
+    var favTick by remember { mutableIntStateOf(0) }
+    var favorites by remember { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(favTick) {
+        favorites = FavoritesStore.list(context).map { it.path.trim('/') }.toSet()
+    }
     val chats by ChatRepository.conversations.collectAsState()
     val cancelledUploads = remember { java.util.concurrent.ConcurrentHashMap.newKeySet<Long>() }
     val uploadJobs = remember { mutableMapOf<Long, java.util.UUID>() }
@@ -366,9 +380,51 @@ fun AirdFilesScreen(
         else -> folder.substringAfterLast('/')
     }
 
+    var dropHighlight by remember { mutableStateOf(false) }
+    val onDropFiles = rememberUpdatedState<(List<Uri>) -> Unit> { uris ->
+        if (!managing || uris.isEmpty()) return@rememberUpdatedState
+        uploadDest = folder
+        uris.forEach { uri -> queueUpload(folder, uri, displayName(context, uri), uriSize(context, uri)) }
+    }
+    val fileDropTarget = remember {
+        object : androidx.compose.ui.draganddrop.DragAndDropTarget {
+            override fun onStarted(event: androidx.compose.ui.draganddrop.DragAndDropEvent) {
+                dropHighlight = true
+            }
+            override fun onEnded(event: androidx.compose.ui.draganddrop.DragAndDropEvent) {
+                dropHighlight = false
+            }
+            override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
+                dropHighlight = false
+                val clip = event.toAndroidDragEvent().clipData ?: return false
+                val uris = buildList {
+                    for (i in 0 until clip.itemCount) {
+                        clip.getItemAt(i)?.uri?.let { add(it) }
+                    }
+                }
+                if (uris.isEmpty()) return false
+                onDropFiles.value(uris)
+                return true
+            }
+        }
+    }
     Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
+        modifier = Modifier
+            .fillMaxSize()
+            .then(
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && managing) {
+                    Modifier
+                        .background(
+                            if (dropHighlight) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                            else MaterialTheme.colorScheme.background,
+                        )
+                        .dragAndDropTarget(
+                            shouldStartDragAndDrop = { true },
+                            target = fileDropTarget,
+                        )
+                } else Modifier,
+            ),
+        containerColor = if (dropHighlight) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.ime),
         topBar = {
             TopAppBar(
@@ -479,6 +535,13 @@ fun AirdFilesScreen(
                         val target = walked
                         Crumb(segment, folder == target) { openFolder(target, target.length > folder.length) }
                     }
+                }
+            }
+            if (managing && tag == null && placing == null) {
+                FavoritesStrip(reloadKey = favTick) { fav ->
+                    val looksFile = '.' in fav.name
+                    val dest = if (looksFile) fav.path.substringBeforeLast('/', "") else fav.path
+                    openFolder(dest, true)
                 }
             }
             if (catalog.names.isNotEmpty() && placing == null) {
@@ -786,6 +849,9 @@ fun AirdFilesScreen(
             },
         )
     }
+    shareLinkPaths?.let { paths ->
+        ShareLinkSheet(paths = paths, onDismiss = { shareLinkPaths = null })
+    }
     val menu = menuEntry
     if (menu != null) {
         ModalBottomSheet(onDismissRequest = { menuEntry = null }) {
@@ -834,6 +900,19 @@ fun AirdFilesScreen(
                 SheetRow("Share in chat", Icons.Outlined.Share) {
                     menuEntry = null
                     shareWith = listOf(menu)
+                }
+                SheetRow("Share link", Icons.Outlined.Link) {
+                    menuEntry = null
+                    shareLinkPaths = listOf(menu.path)
+                }
+                val starred = menu.path.trim('/') in favorites
+                SheetRow(if (starred) "Remove favorite" else "Favorite", Icons.Outlined.Star) {
+                    val path = menu.path
+                    menuEntry = null
+                    scope.launch {
+                        FavoritesStore.toggle(context, path)
+                        favTick++
+                    }
                 }
                 SheetRow("Tags", Icons.AutoMirrored.Outlined.Label) {
                     menuEntry = null

@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,7 +30,12 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PhoneInTalk
 import androidx.compose.material.icons.rounded.Poll
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.FolderShared
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -43,6 +50,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,24 +61,34 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import com.aird.ServerStore
 import com.aird.app.HomeTab
 import com.aird.app.LocalNavigator
 import com.aird.chat.ui.AppSettingsSheet
 import com.aird.chat.ui.EnhancedSecureHub
 import com.aird.chat.ui.KeyBackupSheet
+import com.aird.data.NotificationPreviewLevel
+import com.aird.data.PrivacyPrefs
 import com.aird.designsystem.components.AirdLargeTopBar
 import com.aird.designsystem.components.Avatar
 import com.aird.designsystem.components.BackButton
 import com.aird.designsystem.components.SectionHeader
 import com.aird.designsystem.components.SegmentedGroup
 import com.aird.designsystem.components.SettingRow
+import com.aird.designsystem.components.SwitchRow
 import com.aird.designsystem.theme.LocalAirdColors
 import com.aird.designsystem.theme.Spacing
 import com.aird.feature.chats.toStatus
 import com.aird.designsystem.components.ConnectionStatus
+import com.aird.chat.data.CollabRepository
+import com.aird.chat.model.ListSummary
 import com.aird.session.AirdSocket
 import com.aird.session.Session
+import com.aird.widget.WidgetStore
+import com.aird.widget.WidgetUpdater
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,9 +101,13 @@ fun SettingsScreen(onBack: () -> Unit) {
     var appearance by remember { mutableStateOf(false) }
     var keys by remember { mutableStateOf(false) }
     var confirmSignOut by remember { mutableStateOf(false) }
+    var pickChecklist by remember { mutableStateOf(false) }
+    var checklistTitle by remember { mutableStateOf(WidgetStore.checklistTitle(context)) }
+    val scope = rememberCoroutineScope()
     var resumes by remember { mutableIntStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumes++ }
     val access = remember(resumes) { DeviceAccess.read(context) }
+    val privacy by PrivacyPrefs.settings.collectAsStateWithLifecycle()
     val server = remember { ServerStore.get(context).removePrefix("https://").removePrefix("http://").trimEnd('/') }
 
     Scaffold(
@@ -172,6 +194,31 @@ fun SettingsScreen(onBack: () -> Unit) {
             item(key = "privacy") {
                 SectionHeader("Privacy & security")
                 SegmentedGroup {
+                    SwitchRow(
+                        title = "Hide from Recents",
+                        subtitle = "Block screenshots in the app switcher",
+                        icon = Icons.Rounded.VisibilityOff,
+                        checked = privacy.hideRecents,
+                        onCheckedChange = { PrivacyPrefs.setHideRecents(context, it) },
+                    )
+                    SettingRow(
+                        title = "Notification previews",
+                        subtitle = when (privacy.notificationPreviewLevel) {
+                            NotificationPreviewLevel.ShowAll -> "Show message content"
+                            NotificationPreviewLevel.SenderOnly -> "Sender only"
+                            NotificationPreviewLevel.Hidden -> "Hidden on lock screen"
+                        },
+                        icon = Icons.Rounded.Visibility,
+                        chevron = true,
+                        onClick = {
+                            val next = when (privacy.notificationPreviewLevel) {
+                                NotificationPreviewLevel.ShowAll -> NotificationPreviewLevel.SenderOnly
+                                NotificationPreviewLevel.SenderOnly -> NotificationPreviewLevel.Hidden
+                                NotificationPreviewLevel.Hidden -> NotificationPreviewLevel.ShowAll
+                            }
+                            PrivacyPrefs.setNotificationPreview(context, next)
+                        },
+                    )
                     SettingRow(
                         title = "Key backup",
                         subtitle = "Restore your encrypted history on a new device",
@@ -189,6 +236,45 @@ fun SettingsScreen(onBack: () -> Unit) {
                             EnhancedSecureHub.ensureStarted()
                             navigator.openSecure()
                         },
+                    )
+                    SettingRow(
+                        title = "Active devices",
+                        subtitle = "See and revoke signed-in sessions",
+                        icon = Icons.Rounded.Devices,
+                        chevron = true,
+                        onClick = navigator::openSessions,
+                    )
+                    SettingRow(
+                        title = "Starred messages",
+                        icon = Icons.Rounded.Star,
+                        chevron = true,
+                        onClick = navigator::openStarred,
+                    )
+                }
+            }
+            item(key = "files") {
+                SectionHeader("Files")
+                SegmentedGroup {
+                    SettingRow(
+                        title = "Camera backup",
+                        subtitle = "Upload new photos and videos automatically",
+                        icon = Icons.Rounded.CloudUpload,
+                        chevron = true,
+                        onClick = navigator::openBackup,
+                    )
+                    SettingRow(
+                        title = "Share links",
+                        subtitle = "Public links you've created",
+                        icon = Icons.Rounded.Link,
+                        chevron = true,
+                        onClick = navigator::openShareLinks,
+                    )
+                    SettingRow(
+                        title = "Storage insights",
+                        subtitle = "See what takes up space",
+                        icon = Icons.Rounded.Storage,
+                        chevron = true,
+                        onClick = { navigator.openStorage("") },
                     )
                 }
             }
@@ -212,6 +298,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                         icon = Icons.AutoMirrored.Rounded.ListAlt,
                         chevron = true,
                         onClick = { navigator.openTab(HomeTab.Lists) },
+                    )
+                    SettingRow(
+                        title = "Home screen checklist",
+                        subtitle = checklistTitle.ifBlank { "Choose which list the widget shows" },
+                        icon = Icons.AutoMirrored.Rounded.ListAlt,
+                        chevron = true,
+                        onClick = { pickChecklist = true },
                     )
                 }
             }
@@ -237,6 +330,17 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
 
+    if (pickChecklist) {
+        ChecklistPicker(
+            onDismiss = { pickChecklist = false },
+            onPick = { id, title ->
+                WidgetStore.setChecklistList(context, id, title)
+                checklistTitle = title
+                pickChecklist = false
+                scope.launch { WidgetUpdater.refreshChecklist(context) }
+            },
+        )
+    }
     if (appearance) AppSettingsSheet(onDismiss = { appearance = false })
     if (keys) KeyBackupSheet(onDismiss = { keys = false })
     if (confirmSignOut) {
@@ -254,6 +358,36 @@ fun SettingsScreen(onBack: () -> Unit) {
             dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") } },
         )
     }
+}
+
+@Composable
+private fun ChecklistPicker(onDismiss: () -> Unit, onPick: (String, String) -> Unit) {
+    val context = LocalContext.current
+    var lists by remember { mutableStateOf<List<ListSummary>>(emptyList()) }
+    var error by remember { mutableStateOf("") }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        runCatching { CollabRepository.listBoard(context).lists }
+            .onSuccess { lists = it }
+            .onFailure { error = it.message ?: "Could not load lists" }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Checklist widget") },
+        text = {
+            when {
+                error.isNotEmpty() -> Text(error)
+                lists.isEmpty() -> Text("Loading lists…")
+                else -> Column(Modifier.height(280.dp).verticalScroll(rememberScrollState())) {
+                    lists.forEach { list ->
+                        TextButton(onClick = { onPick(list.id, list.title.ifBlank { "List" }) }, modifier = Modifier.fillMaxWidth()) {
+                            Text(list.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 data class DeviceAccess(val notifications: Boolean, val fullScreen: Boolean, val unrestricted: Boolean) {

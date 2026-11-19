@@ -10,7 +10,9 @@ import com.aird.data.net.AirdImages
 class AirdApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
+        com.aird.session.AirdHttp.configure(this)
         com.aird.theme.ThemeStore.load(this)
+        com.aird.data.PrivacyPrefs.load(this)
         val config = DefaultEmojiCompatConfig.create(this)
         if (config != null) {
             EmojiCompat.init(config)

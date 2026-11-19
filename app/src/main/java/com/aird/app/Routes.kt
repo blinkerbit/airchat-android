@@ -26,6 +26,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class StorageRoute(val path: String = "")
 @Serializable data object ShareLinksRoute
 @Serializable data object BackupRoute
+@Serializable data class GalleryRoute(val id: String)
 
 enum class HomeTab(val label: String, val selected: ImageVector, val idle: ImageVector) {
     Chats("Chats", Icons.AutoMirrored.Rounded.Chat, Icons.AutoMirrored.Outlined.Chat),
@@ -62,6 +63,7 @@ interface AppNavigator {
     fun openStorage(path: String = "")
     fun openShareLinks()
     fun openBackup()
+    fun openGallery(id: String)
     fun openTab(tab: HomeTab)
 }
 

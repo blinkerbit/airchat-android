@@ -282,6 +282,7 @@ object ChatRepository {
         _presence.value = _presence.value + presenceMap
         _error.value = ""
         publishUnreadBadge()
+        com.aird.widget.WidgetUpdater.onConversationsRefreshed(context)
     }
 
     /**

@@ -47,13 +47,15 @@ fun resolveDark(prefs: ThemePrefs): Boolean {
 fun rememberAirdColorScheme(prefs: ThemePrefs, dark: Boolean): ColorScheme {
     val context = LocalContext.current
     return remember(prefs.paletteId, prefs.amoled, dark) {
-        val amoled = dark && prefs.amoled
+        val isMidnight = prefs.paletteId == "midnight"
+        val amoled = dark && (prefs.amoled || isMidnight)
         if (prefs.dynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val base = if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
             if (amoled) base.toAmoled() else base
         } else {
             val palette = AirdPalettes.byId(prefs.paletteId)
-            dynamicColorScheme(palette.seed, dark, amoled, style = palette.style)
+            val scheme = dynamicColorScheme(palette.seed, dark, amoled, style = palette.style)
+            if (amoled) scheme.toAmoled() else scheme
         }
     }
 }
@@ -62,9 +64,17 @@ private fun ColorScheme.toAmoled(): ColorScheme = copy(
     background = Color.Black,
     surface = Color.Black,
     surfaceDim = Color.Black,
+    surfaceBright = Color(0xFF121212),
     surfaceContainerLowest = Color.Black,
-    surfaceContainerLow = Color(0xFF07080A),
-    surfaceContainer = Color(0xFF0D0E11),
+    surfaceContainerLow = Color(0xFF040406),
+    surfaceContainer = Color(0xFF09090C),
+    surfaceContainerHigh = Color(0xFF101014),
+    surfaceContainerHighest = Color(0xFF16161C),
+    surfaceVariant = Color(0xFF0E0E12),
+    onSurface = Color(0xFFF8FAFC),
+    onSurfaceVariant = Color(0xFF94A3B8),
+    outline = Color(0xFF334155),
+    outlineVariant = Color(0xFF1E293B),
 )
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)

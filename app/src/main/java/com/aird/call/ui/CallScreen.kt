@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Outline
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -14,12 +15,19 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +42,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
@@ -45,34 +54,34 @@ import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.StopScreenShare
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -80,22 +89,25 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
+import androidx.core.content.ContextCompat
 import com.aird.MainActivity
 import com.aird.call.CallController
 import com.aird.call.CallDevices
 import com.aird.call.CallPhase
 import com.aird.call.DeviceChoice
-import io.livekit.android.renderer.TextureViewRenderer
-import io.livekit.android.room.track.VideoTrack
+import com.aird.designsystem.components.Avatar
+import com.aird.designsystem.components.avatarBrush
+import com.aird.designsystem.theme.LocalAirdColors
 import com.aird.ui.LocalAirdReducedMotion
 import com.aird.ui.PressIconButton
+import io.livekit.android.renderer.TextureViewRenderer
+import io.livekit.android.room.track.VideoTrack
+import kotlinx.coroutines.delay
 import livekit.org.webrtc.Camera2Enumerator
 import livekit.org.webrtc.RendererCommon
 import kotlin.math.abs
 import kotlin.math.roundToInt
-
-private val CallBg = Color(0xFF0B141A)
-private val CallGlass = Color(0x66000000)
 
 @Composable
 fun CallScreen() {
@@ -108,7 +120,17 @@ fun CallScreen() {
     val collapsed by CallController.tileCollapsed.collectAsState()
     val tile by CallController.tile.collectAsState()
     val inPip by MainActivity.inPip.collectAsState()
+    val colors = LocalAirdColors.current
+    val scheme = MaterialTheme.colorScheme
+    val callBg = if (colors.dark) scheme.surfaceContainerLowest else Color(0xFF0B141A)
+    val glass = scheme.scrim.copy(alpha = 0.4f)
+    val answer = colors.success
+    val answerVideo = colors.online
+    val decline = colors.danger
+    val onOverlay = Color.White
     var menu by remember { mutableStateOf("") }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var lastInteract by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) CallController.setCallMode(context, true)
     }
@@ -127,38 +149,74 @@ fun CallScreen() {
         null
     }
     val tileFeed = if (call.mode != "video" || full == null) null else if (swapped) remote?.takeIf { it != full } else self?.takeIf { it != full }
-    Box(Modifier.fillMaxSize().background(CallBg)) {
+    val live = call.phase == CallPhase.Live
+    val peerName = call.peer.ifEmpty { "Aird" }
+
+    LaunchedEffect(call.phase, lastInteract, live) {
+        if (!live) {
+            controlsVisible = true
+            return@LaunchedEffect
+        }
+        controlsVisible = true
+        delay(3_500)
+        if (System.currentTimeMillis() - lastInteract >= 3_400) controlsVisible = false
+    }
+
+    fun bumpControls() {
+        lastInteract = System.currentTimeMillis()
+        controlsVisible = true
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(callBg)
+            .pointerInput(live) {
+                if (!live) return@pointerInput
+                detectTapGestures {
+                    controlsVisible = !controlsVisible
+                    if (controlsVisible) lastInteract = System.currentTimeMillis()
+                }
+            },
+    ) {
         if (full != null) key("stage") { VideoSurface(full, Modifier.fillMaxSize()) }
         if (!inPip && full == null) {
+            PeerBackdrop(name = peerName, ringing = call.phase == CallPhase.Incoming || call.phase == CallPhase.Outgoing)
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.size(112.dp).clip(CircleShape).background(Color(0xFF1F2C34)), contentAlignment = Alignment.Center) {
-                    Text(call.peer.ifEmpty { "A" }.take(1).uppercase(), color = Color.White, fontSize = 42.sp, fontWeight = FontWeight.SemiBold)
-                }
-                Text(call.peer.ifEmpty { "Aird" }, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 18.dp))
+                RingingAvatar(
+                    name = peerName,
+                    ringing = call.phase == CallPhase.Incoming || call.phase == CallPhase.Outgoing,
+                    size = 112.dp,
+                )
+                Text(
+                    peerName,
+                    color = onOverlay,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 18.dp),
+                )
                 if (call.phase == CallPhase.Incoming) IncomingKind(call.mode == "video")
-                else FadingStatus(call.status, Modifier.padding(top = 6.dp), Color(0xFFB8C4CC))
+                else FadingStatus(call.status, Modifier.padding(top = 6.dp), onOverlay.copy(alpha = 0.78f))
             }
         }
         if (!inPip && full != null) {
             val overlay = if (call.status.isNotEmpty() && call.status != "Connected") call.status else ""
-            FadingStatus(overlay, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 56.dp), Color.White, 18.sp)
+            FadingStatus(overlay, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 56.dp), onOverlay, 18.sp)
         }
         if (inPip && full == null && call.phase != CallPhase.Idle) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.size(56.dp).clip(CircleShape).background(Color(0xFF1F2C34)), contentAlignment = Alignment.Center) {
-                    Text(call.peer.ifEmpty { "A" }.take(1).uppercase(), color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-                }
-                Text(call.peer.ifEmpty { "Aird" }, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                Avatar(name = peerName, size = 56.dp)
+                Text(peerName, color = onOverlay, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
             }
         }
         if (inPip && call.phase != CallPhase.Idle) {
             Row(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0x99000000)).padding(vertical = 4.dp),
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(scheme.scrim.copy(alpha = 0.6f)).padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 PressIconButton(onClick = { (context as? MainActivity)?.hideCallToBackground() }, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Hide", tint = Color.White)
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Hide", tint = onOverlay)
                 }
                 PressIconButton(
                     onClick = {
@@ -167,7 +225,7 @@ fun CallScreen() {
                     },
                     modifier = Modifier.size(40.dp),
                 ) {
-                    Icon(Icons.Default.OpenInFull, contentDescription = "Maximize", tint = Color.White)
+                    Icon(Icons.Default.OpenInFull, contentDescription = "Maximize", tint = onOverlay)
                 }
             }
         }
@@ -191,6 +249,7 @@ fun CallScreen() {
                                     change.consume()
                                     moved += abs(drag.x) + abs(drag.y)
                                     CallController.moveTile(tile.x + drag.x, tile.y + drag.y)
+                                    bumpControls()
                                 },
                                 onDragEnd = {
                                     if (moved < 12f) CallController.swapFeeds()
@@ -202,122 +261,149 @@ fun CallScreen() {
                 }
                 Text(
                     "–",
-                    color = Color.White,
-                    modifier = Modifier.align(Alignment.TopStart).clickable { CallController.collapseTile() }.padding(6.dp),
+                    color = onOverlay,
+                    modifier = Modifier.align(Alignment.TopStart).clickable {
+                        CallController.collapseTile()
+                        bumpControls()
+                    }.padding(6.dp),
                     fontSize = 22.sp,
                 )
             }
         }
         if (!inPip && call.phase != CallPhase.Idle) {
-            Column(
-                Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp).fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
+            val reduced = LocalAirdReducedMotion.current
+            AnimatedVisibility(
+                visible = controlsVisible || call.phase == CallPhase.Incoming,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = if (reduced) EnterTransition.None else fadeIn(tween(160)),
+                exit = if (reduced) ExitTransition.None else fadeOut(tween(220)),
             ) {
-                val reduced = LocalAirdReducedMotion.current
-                AnimatedVisibility(
-                    visible = call.routeHint.isNotEmpty(),
-                    enter = if (reduced) EnterTransition.None else fadeIn(tween(160)),
-                    exit = if (reduced) ExitTransition.None else fadeOut(tween(220)),
+                Column(
+                    Modifier.navigationBarsPadding().padding(bottom = 12.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text(
-                        call.routeHint,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier
-                            .padding(bottom = 10.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xCC000000))
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                    )
-                }
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (call.phase == CallPhase.Incoming) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CallButton(Color(0xFF25D366), Icons.Default.Call, "Answer") { CallController.accept(context, withCamera = false) }
-                            Text("Answer", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-                        }
-                        if (call.mode == "video") {
+                    AnimatedVisibility(
+                        visible = call.routeHint.isNotEmpty(),
+                        enter = if (reduced) EnterTransition.None else fadeIn(tween(160)),
+                        exit = if (reduced) ExitTransition.None else fadeOut(tween(220)),
+                    ) {
+                        Text(
+                            call.routeHint,
+                            color = onOverlay,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .padding(bottom = 10.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(scheme.scrim.copy(alpha = 0.8f))
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                        )
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (call.phase == CallPhase.Incoming) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CallButton(Color(0xFF1F6F5B), Icons.Default.Videocam, "Video") {
-                                    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                                    if (granted) CallController.accept(context, withCamera = true) else answerWithVideo.launch(Manifest.permission.CAMERA)
-                                }
-                                Text("Video", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                                CallButton(answer, Icons.Default.Call, "Answer") { CallController.accept(context, withCamera = false) }
+                                Text("Answer", color = onOverlay, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
                             }
-                        }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CallButton(Color(0xFFE53935), Icons.Default.CallEnd, "Decline") { CallController.decline(context) }
-                            Text("Decline", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-                        }
-                    } else {
-                        CallButton(CallGlass, if (call.muted) Icons.Default.MicOff else Icons.Default.Mic, "Mute", CallController::toggleMute)
-                        Box {
-                            var audioChoices by remember { mutableStateOf(emptyList<DeviceChoice>()) }
-                            val audioIcon = when (call.output) {
-                                "speaker" -> Icons.AutoMirrored.Filled.VolumeUp
-                                "headset" -> Icons.Default.Headphones
-                                else -> Icons.Default.Phone
-                            }
-                            val audioName = when (call.output) {
-                                "speaker" -> "Speaker"
-                                "headset" -> "Headset"
-                                else -> "Earpiece"
-                            }
-                            CallButton(CallGlass, audioIcon, audioName) {
-                                audioChoices = CallDevices.audioOutputs(context, CallController.room())
-                                val hasHeadset = audioChoices.any { CallDevices.outputKey(it) == "headset" }
-                                if (hasHeadset || audioChoices.size > 2) {
-                                    menu = if (menu == "audio") "" else "audio"
-                                } else {
-                                    CallController.toggleSpeaker(context)
+                            if (call.mode == "video") {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CallButton(answerVideo, Icons.Default.Videocam, "Video") {
+                                        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                        if (granted) CallController.accept(context, withCamera = true) else answerWithVideo.launch(Manifest.permission.CAMERA)
+                                    }
+                                    Text("Video", color = onOverlay, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
                                 }
                             }
-                            AudioMenu(
-                                open = menu == "audio",
-                                devices = audioChoices,
-                                onDismiss = { menu = "" },
-                                onSelect = { choice ->
-                                    menu = ""
-                                    CallController.chooseOutput(context, choice)
-                                },
-                            )
-                        }
-                        if (call.mode == "video") {
-                            CallButton(CallGlass, if (call.cameraOn) Icons.Default.Videocam else Icons.Default.VideocamOff, "Camera", CallController::toggleCamera)
-                            if (call.cameraOn) {
-                                CallButton(CallGlass, Icons.Default.Cameraswitch, "Switch Camera") {
-                                    CallController.switchCamera(context)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CallButton(decline, Icons.Default.CallEnd, "Decline") { CallController.decline(context) }
+                                Text("Decline", color = onOverlay, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                            }
+                        } else {
+                            CallButton(glass, if (call.muted) Icons.Default.MicOff else Icons.Default.Mic, "Mute") {
+                                CallController.toggleMute()
+                                bumpControls()
+                            }
+                            Box {
+                                var audioChoices by remember { mutableStateOf(emptyList<DeviceChoice>()) }
+                                val audioIcon = when (call.output) {
+                                    "speaker" -> Icons.AutoMirrored.Filled.VolumeUp
+                                    "headset" -> Icons.Default.Headphones
+                                    else -> Icons.Default.Phone
+                                }
+                                val audioName = when (call.output) {
+                                    "speaker" -> "Speaker"
+                                    "headset" -> "Headset"
+                                    else -> "Earpiece"
+                                }
+                                CallButton(glass, audioIcon, audioName) {
+                                    bumpControls()
+                                    audioChoices = CallDevices.audioOutputs(context, CallController.room())
+                                    val hasHeadset = audioChoices.any { CallDevices.outputKey(it) == "headset" }
+                                    if (hasHeadset || audioChoices.size > 2) {
+                                        menu = if (menu == "audio") "" else "audio"
+                                    } else {
+                                        CallController.toggleSpeaker(context)
+                                    }
+                                }
+                                AudioMenu(
+                                    open = menu == "audio",
+                                    devices = audioChoices,
+                                    onDismiss = { menu = "" },
+                                    onSelect = { choice ->
+                                        menu = ""
+                                        CallController.chooseOutput(context, choice)
+                                        bumpControls()
+                                    },
+                                )
+                            }
+                            if (call.mode == "video") {
+                                CallButton(glass, if (call.cameraOn) Icons.Default.Videocam else Icons.Default.VideocamOff, "Camera") {
+                                    CallController.toggleCamera()
+                                    bumpControls()
+                                }
+                                if (call.cameraOn) {
+                                    CallButton(glass, Icons.Default.Cameraswitch, "Switch Camera") {
+                                        CallController.switchCamera(context)
+                                        bumpControls()
+                                    }
+                                }
+                                CallButton(glass, if (call.sharing) Icons.Default.StopScreenShare else Icons.Default.ScreenShare, "Share") {
+                                    bumpControls()
+                                    if (call.sharing) CallController.stopShare(context)
+                                    else {
+                                        val manager = context.getSystemService(MediaProjectionManager::class.java)
+                                        capture.launch(manager.createScreenCaptureIntent())
+                                    }
                                 }
                             }
-                            CallButton(CallGlass, if (call.sharing) Icons.Default.StopScreenShare else Icons.Default.ScreenShare, "Share") {
-                                if (call.sharing) CallController.stopShare(context)
-                                else {
-                                    val manager = context.getSystemService(MediaProjectionManager::class.java)
-                                    capture.launch(manager.createScreenCaptureIntent())
-                                }
-                            }
+                            CallButton(decline, Icons.Default.CallEnd, "End") { CallController.hangUp(context) }
                         }
-                        CallButton(Color(0xFFE53935), Icons.Default.CallEnd, "End") { CallController.hangUp(context) }
                     }
                 }
             }
-            if (call.phase == CallPhase.Live || call.phase == CallPhase.Outgoing || call.phase == CallPhase.Joining) {
+            AnimatedVisibility(
+                visible = (controlsVisible || call.phase == CallPhase.Incoming) &&
+                    (call.phase == CallPhase.Live || call.phase == CallPhase.Outgoing || call.phase == CallPhase.Joining),
+                modifier = Modifier.align(Alignment.TopStart),
+                enter = if (reduced) EnterTransition.None else fadeIn(tween(160)),
+                exit = if (reduced) ExitTransition.None else fadeOut(tween(220)),
+            ) {
                 val videoCall = call.mode == "video"
                 Column(
-                    Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 12.dp),
+                    Modifier.statusBarsPadding().padding(start = 12.dp, top = 12.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             CallButton(
-                                CallGlass,
+                                glass,
                                 if (videoCall) Icons.Default.Phone else Icons.Default.Videocam,
                                 if (videoCall) "Switch to voice" else "Switch to video",
                             ) {
+                                bumpControls()
                                 if (videoCall) {
                                     CallController.setCallMode(context, false)
                                 } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -328,7 +414,7 @@ fun CallScreen() {
                             }
                             Text(
                                 if (videoCall) "Voice" else "Video",
-                                color = Color.White,
+                                color = onOverlay,
                                 fontSize = 11.sp,
                                 modifier = Modifier.padding(top = 4.dp),
                             )
@@ -337,13 +423,14 @@ fun CallScreen() {
                             Modifier.padding(start = 12.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            CallButton(CallGlass, Icons.Default.KeyboardArrowDown, "Minimize") {
+                            CallButton(glass, Icons.Default.KeyboardArrowDown, "Minimize") {
+                                bumpControls()
                                 val activity = context as? MainActivity
                                 if (activity?.enterCallPip() != true) CallController.minimize()
                             }
                             Text(
                                 "Minimize",
-                                color = Color.White,
+                                color = onOverlay,
                                 fontSize = 11.sp,
                                 modifier = Modifier.padding(top = 4.dp),
                             )
@@ -355,13 +442,16 @@ fun CallScreen() {
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             CallButton(
-                                CallGlass,
+                                glass,
                                 Icons.Default.Videocam,
                                 if (swapped) "Show video" else "Show your video",
-                            ) { CallController.restoreTile() }
+                            ) {
+                                CallController.restoreTile()
+                                bumpControls()
+                            }
                             Text(
                                 if (swapped) "Video" else "You",
-                                color = Color.White,
+                                color = onOverlay,
                                 fontSize = 11.sp,
                                 modifier = Modifier.padding(top = 4.dp),
                             )
@@ -374,6 +464,73 @@ fun CallScreen() {
 }
 
 @Composable
+private fun PeerBackdrop(name: String, ringing: Boolean) {
+    val dark = LocalAirdColors.current.dark
+    val brush = remember(name, dark) { avatarBrush(name, dark) }
+    val scheme = MaterialTheme.colorScheme
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .then(if (Build.VERSION.SDK_INT >= 31) Modifier.blur(48.dp) else Modifier)
+                .background(brush)
+                .graphicsLayer { alpha = 0.55f },
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            scheme.scrim.copy(alpha = 0.35f),
+                            scheme.scrim.copy(alpha = 0.72f),
+                        ),
+                    ),
+                ),
+        )
+        if (ringing && Build.VERSION.SDK_INT < 31) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(scheme.primary.copy(alpha = 0.08f)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun RingingAvatar(name: String, ringing: Boolean, size: Dp) {
+    val reduced = LocalAirdReducedMotion.current
+    val ring = LocalAirdColors.current.online
+    val transition = rememberInfiniteTransition(label = "ringPulse")
+    val animated by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.12f,
+        animationSpec = infiniteRepeatable(
+            tween(900, easing = FastOutSlowInEasing),
+            RepeatMode.Reverse,
+        ),
+        label = "ringScale",
+    )
+    val pulse = if (ringing && !reduced) animated else 1f
+    Box(contentAlignment = Alignment.Center) {
+        if (ringing) {
+            Box(
+                Modifier
+                    .size(size + 18.dp)
+                    .graphicsLayer {
+                        scaleX = pulse
+                        scaleY = pulse
+                        alpha = if (reduced) 0.55f else (1.4f - pulse).coerceIn(0.25f, 0.7f)
+                    }
+                    .border(3.dp, ring.copy(alpha = 0.7f), CircleShape),
+            )
+        }
+        Avatar(name = name, size = size, ring = if (ringing) ring else null)
+    }
+}
+
+@Composable
 fun CallBubble() {
     val call by CallController.snapshot.collectAsState()
     val remote by CallController.remoteVideo.collectAsState()
@@ -382,8 +539,10 @@ fun CallBubble() {
     val swapped by CallController.swapped.collectAsState()
     val bubble by CallController.bubble.collectAsState()
     val context = LocalContext.current
+    val colors = LocalAirdColors.current
     val self = if (call.sharing) screen ?: local else local
     val feed = if (swapped) self ?: remote else remote ?: self
+    val peerName = call.peer.ifEmpty { "Aird" }
     Box(Modifier.fillMaxSize()) {
         Box(
             Modifier.align(Alignment.TopEnd)
@@ -425,11 +584,11 @@ fun CallBubble() {
                     },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(call.peer.ifEmpty { "A" }.take(1).uppercase(), color = Color.White, fontSize = 42.sp, fontWeight = FontWeight.SemiBold)
+                    Avatar(name = peerName, size = 72.dp)
                 }
             }
             Row(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0x99000000)),
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.6f)),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -437,7 +596,7 @@ fun CallBubble() {
                     Icon(if (call.muted) Icons.Default.MicOff else Icons.Default.Mic, contentDescription = "Mute", tint = Color.White)
                 }
                 PressIconButton(onClick = { CallController.hangUp(context) }, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.CallEnd, contentDescription = "End", tint = Color(0xFFE53935))
+                    Icon(Icons.Default.CallEnd, contentDescription = "End", tint = colors.danger)
                 }
                 IconButton(onClick = { CallController.expand() }, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.OpenInFull, contentDescription = "Maximize", tint = Color.White)
@@ -450,9 +609,9 @@ fun CallBubble() {
 @Composable
 private fun AudioMenu(
     open: Boolean,
-    devices: List<com.aird.call.DeviceChoice>,
+    devices: List<DeviceChoice>,
     onDismiss: () -> Unit,
-    onSelect: (com.aird.call.DeviceChoice) -> Unit,
+    onSelect: (DeviceChoice) -> Unit,
 ) {
     DropdownMenu(expanded = open, onDismissRequest = onDismiss) {
         DropdownMenuItem(text = { Text("Audio Output", fontWeight = FontWeight.Bold) }, onClick = {}, enabled = false)
@@ -472,34 +631,24 @@ private fun AudioMenu(
 }
 
 @Composable
-private fun DeviceMenu(open: Boolean, devices: List<com.aird.call.DeviceChoice>, onDismiss: () -> Unit, onPick: (String) -> Unit) {
-    DropdownMenu(expanded = open, onDismissRequest = onDismiss) {
-        if (devices.isEmpty()) {
-            DropdownMenuItem(text = { Text("None") }, onClick = { onPick("") })
-        }
-        devices.forEach { device ->
-            DropdownMenuItem(text = { Text(device.label) }, onClick = { onPick(device.id) })
-        }
-    }
-}
-
-@Composable
 private fun IncomingKind(video: Boolean) {
+    val colors = LocalAirdColors.current
+    val scheme = MaterialTheme.colorScheme
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             if (video) "Video call" else "Voice call",
-            color = if (video) Color(0xFF1A1206) else Color.White,
+            color = if (video) scheme.onTertiaryContainer else Color.White,
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .padding(top = 14.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(if (video) Color(0xFFF5C16C) else Color(0xFF1F6F5B))
+                .background(if (video) scheme.tertiaryContainer else colors.online.copy(alpha = 0.85f))
                 .padding(horizontal = 18.dp, vertical = 8.dp),
         )
         Text(
             if (video) "Answer keeps your camera off" else "Voice only. Your camera stays off",
-            color = if (video) Color(0xFFF5C16C) else Color(0xFFB8C4CC),
+            color = if (video) scheme.tertiaryContainer else Color.White.copy(alpha = 0.78f),
             fontSize = 15.sp,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(top = 10.dp),

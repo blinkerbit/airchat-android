@@ -37,6 +37,12 @@ import com.aird.chat.ui.SharedWithMeScreen
 import com.aird.chat.ui.ShareToAirdSheet
 import com.aird.designsystem.motion.AirdMotion
 import com.aird.designsystem.motion.LocalReducedMotion
+import com.aird.feature.extras.BackupScreen
+import com.aird.feature.extras.ChatGalleryScreen
+import com.aird.feature.extras.SessionsScreen
+import com.aird.feature.extras.ShareLinksScreen
+import com.aird.feature.extras.StarredScreen
+import com.aird.feature.extras.StorageScreen
 import com.aird.feature.settings.SettingsScreen
 import com.aird.feature.thread.ChatInfoScreen
 import com.aird.feature.thread.ThreadScreen
@@ -116,6 +122,18 @@ fun AirdNavHost() {
                     composable<SharedWithMeRoute> { Route { SharedWithMeScreen(onBack = navigator::back) } }
                     composable<PollsRoute> { Route { AirdPollsScreen(onBack = navigator::back) } }
                     composable<SecureRoute> { Route { SecureHost(onBack = navigator::back) } }
+                    composable<StarredRoute> { Route { StarredScreen(onBack = navigator::back) } }
+                    composable<SessionsRoute> { Route { SessionsScreen(onBack = navigator::back) } }
+                    composable<ShareLinksRoute> { Route { ShareLinksScreen(onBack = navigator::back) } }
+                    composable<BackupRoute> { Route { BackupScreen(onBack = navigator::back) } }
+                    composable<StorageRoute> { entry ->
+                        val path = entry.toRoute<StorageRoute>().path
+                        Route { StorageScreen(path = path, onBack = navigator::back) }
+                    }
+                    composable<GalleryRoute> { entry ->
+                        val id = entry.toRoute<GalleryRoute>().id
+                        Route { ChatGalleryScreen(conversationId = id, onBack = navigator::back) }
+                    }
                 }
             }
         }
@@ -188,6 +206,7 @@ private class NavActions(
     override fun openStorage(path: String) = push(StorageRoute(path))
     override fun openShareLinks() = push(ShareLinksRoute)
     override fun openBackup() = push(BackupRoute)
+    override fun openGallery(id: String) = push(GalleryRoute(id))
 
     override fun openTab(tab: HomeTab) {
         ShellState.tab.value = tab

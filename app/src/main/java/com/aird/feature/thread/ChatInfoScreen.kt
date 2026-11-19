@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsOff
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Videocam
@@ -146,6 +147,18 @@ fun ChatInfoScreen(id: String, onBack: () -> Unit) {
                         }
                     }
                     Spacer(Modifier.height(Spacing.xl))
+                }
+            }
+            item(key = "media") {
+                SectionHeader("Media")
+                SegmentedGroup {
+                    SettingRow(
+                        title = "Media, files & links",
+                        subtitle = "Browse everything shared in this chat",
+                        icon = Icons.Rounded.PhotoLibrary,
+                        chevron = true,
+                        onClick = { navigator.openGallery(id) },
+                    )
                 }
             }
             item(key = "privacy") {

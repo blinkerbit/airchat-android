@@ -23,6 +23,8 @@ import com.aird.ChatBubbleActivity
 import com.aird.InternalLaunch
 import com.aird.MainActivity
 import com.aird.chat.model.Conversation
+import com.aird.data.NotificationPreviewLevel
+import com.aird.data.PrivacyPrefs
 import com.aird.MarkAsReadReceiver
 import com.aird.NotificationReplyReceiver
 import com.aird.R
@@ -31,6 +33,7 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 object ChatNotifier {
+    const val SHARE_TARGET_CATEGORY = "com.aird.SHARE_TARGET"
     private data class Note(
         val messageId: String,
         val sender: String,
@@ -351,19 +354,35 @@ object ChatNotifier {
         val sound = ConversationPrefs.isSoundEnabled(app, conversationId)
         val shouldAlert = alert && sound
         AirdConnectionService.ensureChannels(app)
-        val hidden = NotificationCompat.Builder(app, AirdConnectionService.CHANNEL_ID)
+        val preview = PrivacyPrefs.settings.value.notificationPreviewLevel
+        val publicTitle = when (preview) {
+            NotificationPreviewLevel.ShowAll -> label
+            NotificationPreviewLevel.SenderOnly -> label
+            NotificationPreviewLevel.Hidden -> "Aird Chat"
+        }
+        val publicText = when (preview) {
+            NotificationPreviewLevel.ShowAll -> notes.lastOrNull()?.text.orEmpty().ifBlank { "New message" }
+            NotificationPreviewLevel.SenderOnly -> sender.ifBlank { "New message" }
+            NotificationPreviewLevel.Hidden -> "New message"
+        }
+        val publicVersion = NotificationCompat.Builder(app, AirdConnectionService.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_chat)
-            .setContentTitle("Aird Chat")
-            .setContentText("New message")
+            .setContentTitle(publicTitle)
+            .setContentText(publicText)
             .build()
+        val visibility = when (preview) {
+            NotificationPreviewLevel.ShowAll -> NotificationCompat.VISIBILITY_PUBLIC
+            NotificationPreviewLevel.SenderOnly -> NotificationCompat.VISIBILITY_PRIVATE
+            NotificationPreviewLevel.Hidden -> NotificationCompat.VISIBILITY_SECRET
+        }
         val builder = NotificationCompat.Builder(app, AirdConnectionService.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_chat)
             .setStyle(style)
             .setContentIntent(content)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(if (shouldAlert) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_LOW)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setPublicVersion(hidden)
+            .setVisibility(visibility)
+            .setPublicVersion(publicVersion)
             .setSilent(!shouldAlert)
             .setDefaults(if (shouldAlert) NotificationCompat.DEFAULT_ALL else 0)
             .setOnlyAlertOnce(!shouldAlert)
@@ -425,7 +444,13 @@ object ChatNotifier {
                 .setIcon(icon)
                 .setIntent(open)
                 .setPerson(Person.Builder().setName(label).setKey(conversationId).setIcon(icon).setImportant(true).build())
-                .setCategories(setOf("android.shortcut.conversation"))
+                .setCategories(
+                    setOf(
+                        "android.shortcut.conversation",
+                        "android.shortcut.share-target",
+                        SHARE_TARGET_CATEGORY,
+                    ),
+                )
                 .build()
             ShortcutManagerCompat.pushDynamicShortcut(context, shortcut)
             builder.setShortcutId(conversationId)

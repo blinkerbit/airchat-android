@@ -32,16 +32,35 @@ class AirdHttpException(val code: Int, message: String) : Exception(message)
 
 object AirdHttp {
     private val jsonType = "application/json; charset=utf-8".toMediaType()
-    val client: OkHttpClient = OkHttpClient.Builder()
+    private val lock = Any()
+    @Volatile private var http: OkHttpClient = baseBuilder().build()
+    @Volatile private var uploads: OkHttpClient = uploadBuilder(http)
+
+    val client: OkHttpClient get() = http
+
+    /** Call once from [com.aird.AirdApp] so GETs share a 50 MB disk cache. */
+    fun configure(context: Context) {
+        synchronized(lock) {
+            val cacheDir = java.io.File(context.applicationContext.cacheDir, "http")
+            http = baseBuilder()
+                .cache(okhttp3.Cache(cacheDir, 50L * 1024 * 1024))
+                .build()
+            uploads = uploadBuilder(http)
+        }
+    }
+
+    private fun baseBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
         .cookieJar(AndroidCookieJar())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(40, TimeUnit.SECONDS)
-        .build()
 
-    private val uploadClient: OkHttpClient = client.newBuilder()
+    private fun uploadBuilder(base: OkHttpClient): OkHttpClient = base.newBuilder()
         .writeTimeout(30, TimeUnit.MINUTES)
         .readTimeout(10, TimeUnit.MINUTES)
+        .cache(null)
         .build()
+
+    private val uploadClient: OkHttpClient get() = uploads
 
     suspend fun get(context: Context, path: String): AirdResponse = request(context, path, "GET", null)
 
